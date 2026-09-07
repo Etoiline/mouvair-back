@@ -1,0 +1,37 @@
+[project]
+name = "mouvair-back"
+version = "0.1.0"
+description = "Indice horaire des conditions extérieures pour quatre activités sportives"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "fastapi==0.141.1",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "uvicorn[standard]==0.52.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<10",
+    "ruff>=0.16,<0.18",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
