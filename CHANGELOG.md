@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.0 - 2026-09-08
+
 - Add an interactive release script that requires a clean repository and pending changelog entries, updates the project version, dates the release, and creates the gitmoji release commit.
 - Keep the FastAPI metadata version synchronized with the installed backend package.
 - Add shared agent instructions for French code documentation and the validation, changelog, and gitmoji commit workflow.
