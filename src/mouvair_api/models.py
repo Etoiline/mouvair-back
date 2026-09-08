@@ -22,6 +22,7 @@ AirQualityCategory = Literal[
     "Très mauvaise",
     "Extrêmement mauvaise",
 ]
+PollenId = Literal["alder", "birch", "grass", "mugwort", "olive", "ragweed"]
 
 
 class Location(BaseModel):
@@ -41,7 +42,21 @@ class Conditions(BaseModel):
     wind_gusts: float | None = None
     european_aqi: float | None = None
     weather_code: int | None = None
-    weather_codes: list[int] = Field(default_factory=list)
+    weather_codes: list[int | None] = Field(default_factory=list)
+
+
+class PollenForecast(BaseModel):
+    alder: float | None = None
+    birch: float | None = None
+    grass: float | None = None
+    mugwort: float | None = None
+    olive: float | None = None
+    ragweed: float | None = None
+
+
+class SlotConditions(Conditions):
+    apparent_temperature_start: float | None = None
+    apparent_temperature_end: float | None = None
 
 
 class ScoreFactor(BaseModel):
@@ -90,7 +105,9 @@ class SportScore(BaseModel):
 
 class HourlyForecast(BaseModel):
     time: str
-    conditions: Conditions
+    end_time: str
+    conditions: SlotConditions
+    pollen: PollenForecast
     scores: dict[SportId, SportScore]
 
 

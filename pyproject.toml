@@ -7,6 +7,7 @@ dependencies = [
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "pydantic==2.13.4",
+    "tzdata==2026.3",
     "uvicorn[standard]==0.52.4",
 ]
 
@@ -34,4 +35,3 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
-

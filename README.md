@@ -13,6 +13,24 @@ arrondie à l’entier pour l’affichage, après conservation des décimales pe
 Les anciens champs plats `score`, `status`, `factors` et `reasons` restent temporairement présents
 pour maintenir l’interface actuelle ; ils reflètent la note globale et les nouveaux résultats.
 
+## Créneaux et données utilisées
+
+L’API renvoie 24 créneaux consécutifs d’une heure à partir de la prochaine heure pleine. `time` et
+`end_time` contiennent le décalage UTC du lieu afin de distinguer les heures répétées lors d’un
+changement d’heure.
+
+Chaque créneau utilise les deux bornes horaires correspondantes :
+
+- la température ressentie la plus pénalisante est choisie séparément pour chaque activité ;
+- le vent moyen et l’AQI retiennent la valeur maximale des deux bornes ;
+- les précipitations et rafales utilisent la valeur de fin, qui décrit l’heure précédente ;
+- les codes météo des deux bornes sont conservés pour les alertes ;
+- les concentrations maximales d’aulne, bouleau, graminées, armoise, olivier et ambroisie sont
+  exposées dans `pollen`.
+
+Les séries météo et air sont associées par leur timestamp Unix. Un champ absent ou invalide reste
+indisponible et le créneau demeure présent dans la réponse.
+
 ## Commandes
 
 ```powershell
