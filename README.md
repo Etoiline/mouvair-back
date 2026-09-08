@@ -31,6 +31,25 @@ Chaque créneau utilise les deux bornes horaires correspondantes :
 Les séries météo et air sont associées par leur timestamp Unix. Un champ absent ou invalide reste
 indisponible et le créneau demeure présent dans la réponse.
 
+## Cache et fraîcheur
+
+Les prévisions d’une même position sont conservées en mémoire pendant 15 minutes lorsqu’elles
+couvrent encore les 24 créneaux demandés. Une réponse mise en cache garde son heure réelle de
+récupération dans `generated_at`. Le cache contient au maximum 256 positions et est vidé au
+redémarrage du serveur.
+
+La réponse expose les champs suivants :
+
+- `data_state` vaut `fresh` pour des données actuelles, `refresh_failed` lorsqu’une actualisation a
+  échoué avec des données âgées d’au plus une heure, puis `stale` au-delà d’une heure ;
+- `from_cache` indique si les données proviennent de la mémoire du serveur ;
+- `recommendation_available` passe à `false` lorsque les données sont anciennes afin de suspendre
+  le meilleur créneau.
+
+Après un échec d’actualisation, les départs passés sont retirés. Les créneaux futurs encore connus
+sont conservés et les heures manquantes sont ajoutées avec des notes incomplètes. Les demandes
+simultanées pour une même position partagent une seule récupération auprès du fournisseur.
+
 ## Commandes
 
 ```powershell
