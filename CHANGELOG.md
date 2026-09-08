@@ -1,5 +1,7 @@
 # Changelog
 
+- Replace the blended activity score with separate weather, European AQI, and overall scores using the validated weights, caps, alerts, rounding, explanations, and incomplete-data rules while preserving legacy response fields.
+
 ## 0.2.0 - 2026-09-08
 
 - Add an interactive release script that requires a clean repository and pending changelog entries, updates the project version, dates the release, and creates the gitmoji release commit.

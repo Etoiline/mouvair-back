@@ -3,6 +3,25 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 SportId = Literal["easy_run", "hard_run", "cycling", "walking"]
+ScoreStatus = Literal[
+    "favorable",
+    "correct",
+    "mitigé",
+    "défavorable",
+    "très défavorable",
+    "incomplet",
+]
+LegacyScoreStatus = Literal["favorable", "correct", "mitigé", "défavorable", "incomplet"]
+WeatherFactorId = Literal["temperature", "rain", "wind"]
+ScoreFactorId = Literal["air", "temperature", "rain", "wind"]
+AirQualityCategory = Literal[
+    "Bonne",
+    "Acceptable",
+    "Modérée",
+    "Mauvaise",
+    "Très mauvaise",
+    "Extrêmement mauvaise",
+]
 
 
 class Location(BaseModel):
@@ -16,27 +35,55 @@ class Location(BaseModel):
 
 
 class Conditions(BaseModel):
-    apparent_temperature: float
-    precipitation: float
-    wind_speed: float
-    wind_gusts: float
-    european_aqi: float
-    weather_code: int
+    apparent_temperature: float | None = None
+    precipitation: float | None = None
+    wind_speed: float | None = None
+    wind_gusts: float | None = None
+    european_aqi: float | None = None
+    weather_code: int | None = None
+    weather_codes: list[int] = Field(default_factory=list)
 
 
 class ScoreFactor(BaseModel):
-    id: Literal["air", "temperature", "rain", "wind"]
+    id: ScoreFactorId
     label: str
-    score: int = Field(ge=0, le=100)
-    value: float
+    score: int | None = Field(default=None, ge=0, le=100)
+    value: float | None = None
     unit: str
+
+
+class ScoreSummary(BaseModel):
+    score: int | None = Field(default=None, ge=0, le=100)
+    status: ScoreStatus
+
+
+class WeatherScore(ScoreSummary):
+    factors: list[ScoreFactor]
+    reasons: list[str]
+    alerts: list[str]
+
+
+class AirRecommendations(BaseModel):
+    general_population: str
+    sensitive_people: str
+
+
+class AirScore(BaseModel):
+    score: int | None = Field(default=None, ge=0, le=100)
+    aqi: float | None = None
+    category: AirQualityCategory | None = None
+    recommendations: AirRecommendations | None = None
+    reason: str | None = None
 
 
 class SportScore(BaseModel):
     sport: SportId
     label: str
+    weather: WeatherScore
+    air: AirScore
+    overall: ScoreSummary
     score: int | None = Field(default=None, ge=0, le=100)
-    status: Literal["favorable", "correct", "mitigé", "défavorable", "incomplet"]
+    status: LegacyScoreStatus
     factors: list[ScoreFactor]
     reasons: list[str]
 
@@ -53,4 +100,3 @@ class ForecastResponse(BaseModel):
     timezone: str
     generated_at: str
     hours: list[HourlyForecast]
-

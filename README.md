@@ -2,6 +2,17 @@
 
 Cette API récupère les données Open-Meteo et produit les scores horaires des quatre activités.
 
+Pour chaque activité et chaque créneau, le moteur sépare désormais :
+
+- `weather` : note météo, niveau, trois sous-notes, explications et alertes ;
+- `air` : note air, indice européen AQI, catégorie et recommandations générales ;
+- `overall` : note globale combinant météo et air selon l’activité.
+
+Une note impossible à calculer vaut `null` et porte le statut `incomplet`. Une note disponible est
+arrondie à l’entier pour l’affichage, après conservation des décimales pendant tous les calculs.
+Les anciens champs plats `score`, `status`, `factors` et `reasons` restent temporairement présents
+pour maintenir l’interface actuelle ; ils reflètent la note globale et les nouveaux résultats.
+
 ## Commandes
 
 ```powershell
