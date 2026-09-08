@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,8 +43,10 @@ def forecast_at(
     *,
     latitude: float = 45.75,
     longitude: float = 4.85,
+    timezone_name: str = "UTC",
 ) -> ForecastResponse:
-    first_start = _next_full_hour(retrieved_at)
+    timezone = ZoneInfo(timezone_name)
+    first_start = _next_full_hour(retrieved_at, timezone)
     hours = []
     for offset in range(SLOT_COUNT):
         start = first_start + timedelta(hours=offset)
@@ -58,8 +61,8 @@ def forecast_at(
         )
         hours.append(
             HourlyForecast(
-                time=start.isoformat(timespec="minutes"),
-                end_time=end.isoformat(timespec="minutes"),
+                time=start.astimezone(timezone).isoformat(timespec="minutes"),
+                end_time=end.astimezone(timezone).isoformat(timespec="minutes"),
                 conditions=SlotConditions(
                     apparent_temperature=15,
                     apparent_temperature_start=15,
@@ -78,8 +81,8 @@ def forecast_at(
     return ForecastResponse(
         latitude=latitude,
         longitude=longitude,
-        timezone="UTC",
-        generated_at=retrieved_at.isoformat(timespec="seconds"),
+        timezone=timezone_name,
+        generated_at=retrieved_at.astimezone(timezone).isoformat(timespec="seconds"),
         hours=hours,
     )
 
@@ -128,6 +131,24 @@ def test_cache_older_than_fifteen_minutes_is_refreshed() -> None:
     assert refreshed.from_cache is False
     assert refreshed.data_state == "fresh"
     assert refreshed.generated_at == second_retrieval.isoformat(timespec="seconds")
+
+
+def test_fractional_timezone_cache_reuses_the_local_hour_window() -> None:
+    retrieved_at = datetime(2026, 9, 8, 13, 10, tzinfo=UTC)
+    clock = MutableClock(retrieved_at)
+    fetcher = SequencedFetcher(forecast_at(retrieved_at, timezone_name="Asia/Kolkata"))
+    service = ForecastService(fetcher, clock=clock)
+
+    async def scenario() -> ForecastResponse:
+        await service.get_forecast(28.61, 77.21)
+        clock.value += timedelta(minutes=5)
+        return await service.get_forecast(28.61, 77.21)
+
+    cached = asyncio.run(scenario())
+
+    assert fetcher.calls == 1
+    assert cached.from_cache is True
+    assert cached.hours[0].time == "2026-09-08T19:00+05:30"
 
 
 def test_failed_refresh_keeps_recent_slots_and_fills_the_missing_hour() -> None:

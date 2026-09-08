@@ -161,12 +161,21 @@ def _timezone(payload: dict[str, Any]) -> tuple[str, ZoneInfo]:
         raise OpenMeteoError("Fuseau horaire invalide dans la réponse météo") from exc
 
 
-def _next_full_hour(moment: datetime) -> datetime:
+def _next_full_hour(moment: datetime, timezone: ZoneInfo) -> datetime:
+    """Trouve la prochaine heure pleine locale et renvoie son instant UTC."""
     if moment.tzinfo is None:
         raise ValueError("L’instant de récupération doit inclure un fuseau horaire")
     utc_moment = moment.astimezone(UTC)
-    full_hour = utc_moment.replace(minute=0, second=0, microsecond=0)
-    return full_hour if utc_moment == full_hour else full_hour + timedelta(hours=1)
+    candidate = utc_moment.replace(second=0, microsecond=0)
+    if candidate < utc_moment:
+        candidate += timedelta(minutes=1)
+
+    # La chronologie UTC gère correctement les heures locales répétées ou inexistantes.
+    for _ in range(181):
+        if candidate.astimezone(timezone).minute == 0:
+            return candidate
+        candidate += timedelta(minutes=1)
+    raise ValueError("Impossible de déterminer la prochaine heure pleine locale")
 
 
 def _row_value(rows: dict[int, dict[str, object]], timestamp: int, field: str) -> object:
@@ -284,7 +293,7 @@ def _assemble_forecast(
     timezone_name, timezone = _timezone(weather)
     weather_rows = _hourly_rows(weather, WEATHER_FIELDS)
     air_rows = _hourly_rows(air, AIR_FIELDS)
-    first_start = _next_full_hour(retrieved_at)
+    first_start = _next_full_hour(retrieved_at, timezone)
     timestamps = {
         int((first_start + timedelta(hours=offset)).timestamp())
         for offset in range(SLOT_COUNT + 1)
