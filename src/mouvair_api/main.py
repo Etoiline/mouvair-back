@@ -4,12 +4,13 @@ from typing import Annotated
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import __version__
 from .models import ForecastResponse, Location
 from .open_meteo import OpenMeteoError, get_forecast, search_locations
 
 app = FastAPI(
     title="Mouv’Air API",
-    version="0.1.0",
+    version=__version__,
     description="Conditions horaires pour la course, le vélo et la marche.",
 )
 
