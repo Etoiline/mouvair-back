@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -169,8 +170,63 @@ def test_dst_fallback_keeps_a_real_one_hour_interval() -> None:
 
 def test_exact_full_hour_can_be_the_first_departure() -> None:
     moment = datetime(2026, 9, 8, 13, tzinfo=UTC)
-    assert _next_full_hour(moment) == moment
-    assert _next_full_hour(moment + timedelta(seconds=1)) == moment + timedelta(hours=1)
+    timezone = ZoneInfo("Europe/Paris")
+    assert _next_full_hour(moment, timezone) == moment
+    assert _next_full_hour(moment + timedelta(seconds=1), timezone) == moment + timedelta(hours=1)
+
+
+@pytest.mark.parametrize(
+    ("timezone_name", "moment", "expected"),
+    [
+        (
+            "Asia/Kolkata",
+            datetime(2026, 9, 8, 13, 10, tzinfo=UTC),
+            datetime(2026, 9, 8, 13, 30, tzinfo=UTC),
+        ),
+        (
+            "Asia/Kathmandu",
+            datetime(2026, 9, 8, 13, 10, tzinfo=UTC),
+            datetime(2026, 9, 8, 13, 15, tzinfo=UTC),
+        ),
+    ],
+)
+def test_next_full_hour_uses_the_city_timezone(
+    timezone_name: str,
+    moment: datetime,
+    expected: datetime,
+) -> None:
+    assert _next_full_hour(moment, ZoneInfo(timezone_name)) == expected
+
+
+def test_half_hour_timezone_assembles_local_full_hour_slots() -> None:
+    base = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
+    weather = weather_payload(base)
+    weather["timezone"] = "Asia/Kolkata"
+
+    result = _assemble_forecast(
+        weather,
+        air_payload(base),
+        datetime(2026, 9, 8, 13, 10, tzinfo=UTC),
+    )
+
+    assert result.hours[0].time == "2026-09-08T19:00+05:30"
+    assert result.hours[0].end_time == "2026-09-08T20:00+05:30"
+
+
+def test_spring_transition_skips_the_nonexistent_local_hour() -> None:
+    base = datetime(2026, 3, 28, 23, tzinfo=UTC)
+    result = _assemble_forecast(
+        weather_payload(base),
+        air_payload(base),
+        datetime(2026, 3, 29, 0, 30, tzinfo=UTC),
+    )
+
+    first = result.hours[0]
+    assert first.time == "2026-03-29T03:00+02:00"
+    assert first.end_time == "2026-03-29T04:00+02:00"
+    start = datetime.fromisoformat(first.time)
+    end = datetime.fromisoformat(first.end_time)
+    assert end.timestamp() - start.timestamp() == 3600
 
 
 def test_malformed_timestamps_raise_a_provider_error() -> None:

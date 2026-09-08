@@ -17,7 +17,8 @@ pour maintenir l’interface actuelle ; ils reflètent la note globale et les no
 
 L’API renvoie 24 créneaux consécutifs d’une heure à partir de la prochaine heure pleine. `time` et
 `end_time` contiennent le décalage UTC du lieu afin de distinguer les heures répétées lors d’un
-changement d’heure.
+changement d’heure. L’heure pleine est calculée dans le fuseau local, y compris lorsque son décalage
+UTC comporte 30 ou 45 minutes.
 
 Chaque créneau utilise les deux bornes horaires correspondantes :
 

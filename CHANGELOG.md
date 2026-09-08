@@ -1,5 +1,7 @@
 # Changelog
 
+- Calculate forecast windows from full hours in the location timezone, including fractional UTC offsets and daylight-saving transitions, and apply the same alignment to cached data.
+
 - Cache forecasts by position for 15 minutes, preserve stale data after provider failures, maintain 24 future slots, expose freshness metadata, and coalesce concurrent requests.
 
 - Build 24 offset-aware one-hour forecast slots aligned by timestamp, aggregate endpoint values according to provider semantics, add six pollen series, preserve partial slots, and select the worst apparent-temperature endpoint for each activity.

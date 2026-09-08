@@ -59,8 +59,8 @@ def _hour_timestamp(hour: HourlyForecast) -> int | None:
     return int(moment.timestamp())
 
 
-def _requested_timestamps(now: datetime) -> list[int]:
-    first_start = _next_full_hour(now)
+def _requested_timestamps(now: datetime, timezone: ZoneInfo) -> list[int]:
+    first_start = _next_full_hour(now, timezone)
     return [
         int((first_start + timedelta(hours=offset)).timestamp())
         for offset in range(SLOT_COUNT)
@@ -68,12 +68,13 @@ def _requested_timestamps(now: datetime) -> list[int]:
 
 
 def _covers_requested_window(forecast: ForecastResponse, now: datetime) -> bool:
+    timezone = ZoneInfo(forecast.timezone)
     available = {
         timestamp
         for hour in forecast.hours
         if (timestamp := _hour_timestamp(hour)) is not None
     }
-    return all(timestamp in available for timestamp in _requested_timestamps(now))
+    return all(timestamp in available for timestamp in _requested_timestamps(now, timezone))
 
 
 def _unavailable_hour(start: datetime, timezone: ZoneInfo) -> HourlyForecast:
@@ -102,7 +103,7 @@ def _windowed_response(
         for hour in forecast.hours
         if (timestamp := _hour_timestamp(hour)) is not None
     }
-    first_start = _next_full_hour(now)
+    first_start = _next_full_hour(now, timezone)
     hours = []
     for offset in range(SLOT_COUNT):
         start = first_start + timedelta(hours=offset)
