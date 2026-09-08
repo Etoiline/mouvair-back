@@ -5,8 +5,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
+from .forecast_service import forecast_service
 from .models import ForecastResponse, Location
-from .open_meteo import OpenMeteoError, get_forecast, search_locations
+from .open_meteo import OpenMeteoError, search_locations
 
 app = FastAPI(
     title="Mouv’Air API",
@@ -50,7 +51,7 @@ async def forecast(
     longitude: Annotated[float, Query(ge=-180, le=180)],
 ) -> ForecastResponse:
     try:
-        result = await get_forecast(latitude, longitude)
+        result = await forecast_service.get_forecast(latitude, longitude)
     except OpenMeteoError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

@@ -1,5 +1,7 @@
 # Changelog
 
+- Cache forecasts by position for 15 minutes, preserve stale data after provider failures, maintain 24 future slots, expose freshness metadata, and coalesce concurrent requests.
+
 - Build 24 offset-aware one-hour forecast slots aligned by timestamp, aggregate endpoint values according to provider semantics, add six pollen series, preserve partial slots, and select the worst apparent-temperature endpoint for each activity.
 
 - Replace the blended activity score with separate weather, European AQI, and overall scores using the validated weights, caps, alerts, rounding, explanations, and incomplete-data rules while preserving legacy response fields.

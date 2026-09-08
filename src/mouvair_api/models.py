@@ -23,6 +23,7 @@ AirQualityCategory = Literal[
     "Extrêmement mauvaise",
 ]
 PollenId = Literal["alder", "birch", "grass", "mugwort", "olive", "ragweed"]
+ForecastDataState = Literal["fresh", "refresh_failed", "stale"]
 
 
 class Location(BaseModel):
@@ -117,3 +118,6 @@ class ForecastResponse(BaseModel):
     timezone: str
     generated_at: str
     hours: list[HourlyForecast]
+    data_state: ForecastDataState = "fresh"
+    from_cache: bool = False
+    recommendation_available: bool = True
