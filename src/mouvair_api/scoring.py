@@ -222,6 +222,18 @@ def _is_non_negative(value: float | None) -> bool:
     return _is_finite(value) and value >= 0
 
 
+def select_apparent_temperature(
+    start: float | None, end: float | None, sport: SportId
+) -> float | None:
+    """Retient la borne donnant la sous-note thermique la plus basse pour l’activité."""
+    if not _is_finite(start) or not _is_finite(end):
+        return None
+    curve = PROFILES[sport].temperature_curve
+    start_score = interpolate(start, curve)
+    end_score = interpolate(end, curve)
+    return start if start_score <= end_score else end
+
+
 def _wind_exposure(conditions: Conditions, sport: SportId) -> float | None:
     if not _is_non_negative(conditions.wind_speed) or not _is_non_negative(
         conditions.wind_gusts
@@ -231,8 +243,8 @@ def _wind_exposure(conditions: Conditions, sport: SportId) -> float | None:
     return max(conditions.wind_speed, conditions.wind_gusts * gust_ratio)
 
 
-def _condition_codes(conditions: Conditions) -> tuple[int, ...]:
-    codes: list[int] = []
+def _condition_codes(conditions: Conditions) -> tuple[int | None, ...]:
+    codes: list[int | None] = []
     if conditions.weather_code is not None:
         codes.append(conditions.weather_code)
     codes.extend(conditions.weather_codes)
@@ -240,7 +252,7 @@ def _condition_codes(conditions: Conditions) -> tuple[int, ...]:
 
 
 def _event_alerts_and_caps(
-    codes: tuple[int, ...], profile: SportProfile
+    codes: tuple[int | None, ...], profile: SportProfile
 ) -> tuple[list[str], tuple[int, ...]]:
     alerts: list[str] = []
     caps: list[int] = []
@@ -523,6 +535,11 @@ def _build_sport_score(
     reasons = [*weather.public.alerts, *weather.public.reasons]
     if air.public.reason is not None:
         reasons.append(air.public.reason)
+    legacy_factors = [
+        factor
+        for factor in (air_factor, *weather.public.factors)
+        if factor.score is not None and factor.value is not None
+    ]
     return SportScore(
         sport=profile.id,
         label=profile.label,
@@ -531,7 +548,7 @@ def _build_sport_score(
         overall=overall,
         score=overall.score,
         status=_legacy_status(overall.status),
-        factors=[air_factor, *weather.public.factors],
+        factors=legacy_factors,
         reasons=reasons,
     )
 

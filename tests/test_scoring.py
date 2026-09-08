@@ -257,6 +257,7 @@ def test_missing_weather_keeps_air_and_detected_alerts() -> None:
     assert result.weather.alerts == [THUNDERSTORM_ALERT]
     assert result.air.score == 85
     assert result.overall.score is None
+    assert all(item.score is not None and item.value is not None for item in result.factors)
 
 
 @pytest.mark.parametrize(
