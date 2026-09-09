@@ -10,8 +10,8 @@ Pour chaque activité et chaque créneau, le moteur sépare désormais :
 
 Une note impossible à calculer vaut `null` et porte le statut `incomplet`. Une note disponible est
 arrondie à l’entier pour l’affichage, après conservation des décimales pendant tous les calculs.
-Les anciens champs plats `score`, `status`, `factors` et `reasons` restent temporairement présents
-pour maintenir l’interface actuelle ; ils reflètent la note globale et les nouveaux résultats.
+Le contrat `SportScore` expose uniquement ces trois sections afin de conserver une source claire
+pour chaque note, ses facteurs et ses explications.
 
 ## Créneaux et données utilisées
 

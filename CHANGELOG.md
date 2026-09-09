@@ -1,5 +1,7 @@
 # Changelog
 
+- Remove deprecated flat sport-score fields and expose weather, air, and overall results only through their nested sections.
+
 - Calculate forecast windows from full hours in the location timezone, including fractional UTC offsets and daylight-saving transitions, and apply the same alignment to cached data.
 
 - Cache forecasts by position for 15 minutes, preserve stale data after provider failures, maintain 24 future slots, expose freshness metadata, and coalesce concurrent requests.
