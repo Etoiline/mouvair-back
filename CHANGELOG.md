@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.3.0 - 2026-09-09
+
 - Remove deprecated flat sport-score fields and expose weather, air, and overall results only through their nested sections.
 
 - Calculate forecast windows from full hours in the location timezone, including fractional UTC offsets and daylight-saving transitions, and apply the same alignment to cached data.

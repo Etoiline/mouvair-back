@@ -1,6 +1,6 @@
 [project]
 name = "mouvair-back"
-version = "0.2.0"
+version = "0.3.0"
 description = "Indice horaire des conditions extérieures pour quatre activités sportives"
 requires-python = ">=3.12,<4.0"
 dependencies = [
