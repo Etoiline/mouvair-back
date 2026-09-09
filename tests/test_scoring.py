@@ -257,7 +257,6 @@ def test_missing_weather_keeps_air_and_detected_alerts() -> None:
     assert result.weather.alerts == [THUNDERSTORM_ALERT]
     assert result.air.score == 85
     assert result.overall.score is None
-    assert all(item.score is not None and item.value is not None for item in result.factors)
 
 
 @pytest.mark.parametrize(
@@ -290,9 +289,6 @@ def test_air_score_is_identical_for_all_activities() -> None:
     assert {result.air.category for result in scores.values()} == {"Modérée"}
 
 
-def test_legacy_fields_keep_the_current_frontend_compatible() -> None:
+def test_sport_score_serializes_only_the_three_score_sections() -> None:
     result = calculate_score(conditions(weather_code=95), "easy_run")
-    assert result.score == result.overall.score == 10
-    assert result.status == "défavorable"
-    assert [item.id for item in result.factors] == ["air", "temperature", "rain", "wind"]
-    assert result.reasons[0] == THUNDERSTORM_ALERT
+    assert set(result.model_dump()) == {"sport", "label", "weather", "air", "overall"}

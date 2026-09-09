@@ -11,9 +11,7 @@ ScoreStatus = Literal[
     "très défavorable",
     "incomplet",
 ]
-LegacyScoreStatus = Literal["favorable", "correct", "mitigé", "défavorable", "incomplet"]
 WeatherFactorId = Literal["temperature", "rain", "wind"]
-ScoreFactorId = Literal["air", "temperature", "rain", "wind"]
 AirQualityCategory = Literal[
     "Bonne",
     "Acceptable",
@@ -61,7 +59,7 @@ class SlotConditions(Conditions):
 
 
 class ScoreFactor(BaseModel):
-    id: ScoreFactorId
+    id: WeatherFactorId
     label: str
     score: int | None = Field(default=None, ge=0, le=100)
     value: float | None = None
@@ -93,15 +91,12 @@ class AirScore(BaseModel):
 
 
 class SportScore(BaseModel):
+    # Le contrat public conserve chaque famille de données dans sa section, sans copie à plat.
     sport: SportId
     label: str
     weather: WeatherScore
     air: AirScore
     overall: ScoreSummary
-    score: int | None = Field(default=None, ge=0, le=100)
-    status: LegacyScoreStatus
-    factors: list[ScoreFactor]
-    reasons: list[str]
 
 
 class HourlyForecast(BaseModel):

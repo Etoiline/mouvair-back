@@ -7,7 +7,6 @@ from .models import (
     AirRecommendations,
     AirScore,
     Conditions,
-    LegacyScoreStatus,
     ScoreFactor,
     ScoreStatus,
     ScoreSummary,
@@ -514,42 +513,17 @@ def _calculate_overall(
     return ScoreSummary(score=displayed_score, status=score_status(displayed_score))
 
 
-def _legacy_status(status: ScoreStatus) -> LegacyScoreStatus:
-    if status == "très défavorable":
-        return "défavorable"
-    return status
-
-
 def _build_sport_score(
     conditions: Conditions, profile: SportProfile, air: RawAirScore
 ) -> SportScore:
     weather = _calculate_weather(conditions, profile)
     overall = _calculate_overall(weather, air, profile)
-    air_factor = ScoreFactor(
-        id="air",
-        label="Qualité de l’air",
-        score=air.public.score,
-        value=air.public.aqi,
-        unit="AQI UE",
-    )
-    reasons = [*weather.public.alerts, *weather.public.reasons]
-    if air.public.reason is not None:
-        reasons.append(air.public.reason)
-    legacy_factors = [
-        factor
-        for factor in (air_factor, *weather.public.factors)
-        if factor.score is not None and factor.value is not None
-    ]
     return SportScore(
         sport=profile.id,
         label=profile.label,
         weather=weather.public,
         air=air.public,
         overall=overall,
-        score=overall.score,
-        status=_legacy_status(overall.status),
-        factors=legacy_factors,
-        reasons=reasons,
     )
 
 
