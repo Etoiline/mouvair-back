@@ -116,14 +116,22 @@ Remplacer `CLIENT_ID_HMAC_SECRET` dans `.env` par une valeur aléatoire longue a
 l’API. Redis n’est pas obligatoire uniquement si `.env` contient explicitement
 `REDIS_FAILURE_MODE=local`.
 
-Tests et qualité :
+Tests complets avec une instance Redis locale :
 
 ```powershell
+docker compose up -d redis
+docker compose exec -T redis redis-cli ping
+$env:TEST_REDIS_URL="redis://127.0.0.1:6379/15"
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff check .
-$env:TEST_REDIS_URL="redis://127.0.0.1:6379/15"
-.\.venv\Scripts\python.exe -m pytest -m redis_integration
+Remove-Item Env:TEST_REDIS_URL
+docker compose stop redis
 ```
+
+La commande `ping` doit répondre `PONG`. Les tests marqués `redis_integration` utilisent la base 15,
+nettoient leurs clés et vérifient les réservations concurrentes, les verrous, le délai partagé et
+`/health`. `docker compose stop redis` arrête le service sans supprimer le volume persistant, tandis
+que `docker compose down -v` supprimerait aussi les données Redis locales.
 
 ## Créer une release
 
