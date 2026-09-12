@@ -12,6 +12,15 @@ def test_quota_defaults_keep_a_ten_percent_safety_margin() -> None:
     assert settings.open_meteo_quota_month == 270_000
 
 
+def test_client_rate_limit_defaults_allow_interactive_usage() -> None:
+    settings = Settings()
+
+    assert settings.location_rate_limit_minute == 120
+    assert settings.location_rate_limit_hour == 1_200
+    assert settings.forecast_rate_limit_minute == 40
+    assert settings.forecast_rate_limit_hour == 240
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

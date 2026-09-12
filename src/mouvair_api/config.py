@@ -61,10 +61,10 @@ class Settings:
     forecast_shared_cache_ttl_seconds: int = 86_400
     forecast_lock_ttl_seconds: int = 20
     forecast_lock_wait_seconds: float = 6.0
-    location_rate_limit_minute: int = 30
-    location_rate_limit_hour: int = 300
-    forecast_rate_limit_minute: int = 10
-    forecast_rate_limit_hour: int = 60
+    location_rate_limit_minute: int = 120
+    location_rate_limit_hour: int = 1_200
+    forecast_rate_limit_minute: int = 40
+    forecast_rate_limit_hour: int = 240
     client_id_hmac_secret: str = "mouvair-local-development"
     trusted_proxy_cidrs: tuple[str, ...] = ()
 
@@ -152,10 +152,10 @@ class Settings:
             ),
             forecast_lock_ttl_seconds=_integer("FORECAST_LOCK_TTL_SECONDS", 20),
             forecast_lock_wait_seconds=_float("FORECAST_LOCK_WAIT_SECONDS", 6.0),
-            location_rate_limit_minute=_integer("LOCATION_RATE_LIMIT_MINUTE", 30),
-            location_rate_limit_hour=_integer("LOCATION_RATE_LIMIT_HOUR", 300),
-            forecast_rate_limit_minute=_integer("FORECAST_RATE_LIMIT_MINUTE", 10),
-            forecast_rate_limit_hour=_integer("FORECAST_RATE_LIMIT_HOUR", 60),
+            location_rate_limit_minute=_integer("LOCATION_RATE_LIMIT_MINUTE", 120),
+            location_rate_limit_hour=_integer("LOCATION_RATE_LIMIT_HOUR", 1_200),
+            forecast_rate_limit_minute=_integer("FORECAST_RATE_LIMIT_MINUTE", 40),
+            forecast_rate_limit_hour=_integer("FORECAST_RATE_LIMIT_HOUR", 240),
             client_id_hmac_secret=os.getenv(
                 "CLIENT_ID_HMAC_SECRET", "mouvair-local-development"
             ),

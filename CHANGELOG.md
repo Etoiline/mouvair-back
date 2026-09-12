@@ -1,5 +1,7 @@
 # Changelog
 
+- Raise per-client request limits to 120 location searches and 40 forecast requests per minute, with proportional hourly ceilings.
+
 - Add Redis-backed Open-Meteo quota reservations, shared geocoding and forecast caches, distributed locks, per-client rate limits, fail-closed degradation, and real Redis integration coverage.
 
 ## 0.3.0 - 2026-09-09
