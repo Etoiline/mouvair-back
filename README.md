@@ -76,8 +76,8 @@ de lancer en parallèle les appels météo et qualité de l’air. Une réservat
 après un échec, car le fournisseur a pu comptabiliser la requête. Les réponses provenant du cache ne
 consomment aucune unité.
 
-Les limites entrantes par identité client sont de 30 recherches de villes par minute et 300 par
-heure, puis 10 demandes de prévisions par minute et 60 par heure. Elles s’appliquent aussi aux cache
+Les limites entrantes par identité client sont de 120 recherches de villes par minute et 1 200 par
+heure, puis 40 demandes de prévisions par minute et 240 par heure. Elles s’appliquent aussi aux cache
 hits. L’identité est dérivée par HMAC de l’adresse du client ; `X-Forwarded-For` n’est utilisé que si
 le proxy direct appartient à `TRUSTED_PROXY_CIDRS`.
 
