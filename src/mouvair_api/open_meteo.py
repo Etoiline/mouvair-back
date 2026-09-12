@@ -1,7 +1,8 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
-from math import isfinite
-from typing import Any
+from email.utils import parsedate_to_datetime
+from math import ceil, isfinite
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -16,6 +17,7 @@ from .models import (
     SlotConditions,
     SportId,
 )
+from .rate_limit import RateLimitBackendUnavailable, RateLimitExceeded
 from .scoring import calculate_score, select_apparent_temperature
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -47,41 +49,110 @@ class OpenMeteoError(RuntimeError):
     pass
 
 
+class OpenMeteoQuotaError(OpenMeteoError):
+    def __init__(self, message: str, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = max(1, retry_after)
+
+
+class OpenMeteoProviderRateLimit(OpenMeteoError):
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("Open-Meteo limite temporairement les appels")
+        self.retry_after = max(1, retry_after)
+
+
+class QuotaGuard(Protocol):
+    async def reserve(self, cost: int) -> None: ...
+
+    async def block_for(self, seconds: int) -> None: ...
+
+
+def _provider_retry_after(response: httpx.Response) -> int:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return 60
+    try:
+        return max(1, int(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return 60
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(1, ceil((retry_at - datetime.now(UTC)).total_seconds()))
+
+
 async def _get_json(
-    client: httpx.AsyncClient, url: str, params: dict[str, Any]
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     try:
-        response = await client.get(url, params=params)
+        if timeout is None:
+            response = await client.get(url, params=params)
+        else:
+            response = await client.get(url, params=params, timeout=timeout)
         response.raise_for_status()
-        payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            raise OpenMeteoProviderRateLimit(_provider_retry_after(exc.response)) from exc
         raise OpenMeteoError("Open-Meteo est momentanément indisponible") from exc
+    except httpx.HTTPError as exc:
+        raise OpenMeteoError("Open-Meteo est momentanément indisponible") from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise OpenMeteoError("Réponse Open-Meteo invalide") from exc
 
     if not isinstance(payload, dict):
         raise OpenMeteoError("Réponse Open-Meteo invalide")
     return payload
 
 
-async def search_locations(query: str, count: int = 5) -> list[Location]:
-    async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "MouvAir/0.2"}) as client:
-        payload = await _get_json(
-            client,
-            GEOCODING_URL,
-            {"name": query, "count": count, "language": "fr", "format": "json"},
-        )
+async def _search_locations(
+    client: httpx.AsyncClient, query: str, count: int
+) -> list[Location]:
+    payload = await _get_json(
+        client,
+        GEOCODING_URL,
+        {"name": query, "count": count, "language": "fr", "format": "json"},
+        timeout=10,
+    )
 
-    return [
-        Location(
-            id=item["id"],
-            name=item["name"],
-            latitude=item["latitude"],
-            longitude=item["longitude"],
-            country=item.get("country"),
-            admin1=item.get("admin1"),
-            timezone=item.get("timezone"),
-        )
-        for item in payload.get("results", [])
-    ]
+    results = payload.get("results", [])
+    if not isinstance(results, list):
+        raise OpenMeteoError("Réponse Open-Meteo invalide")
+    try:
+        return [
+            Location(
+                id=item["id"],
+                name=item["name"],
+                latitude=item["latitude"],
+                longitude=item["longitude"],
+                country=item.get("country"),
+                admin1=item.get("admin1"),
+                timezone=item.get("timezone"),
+            )
+            for item in results
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OpenMeteoError("Réponse Open-Meteo invalide") from exc
+
+
+async def search_locations(
+    query: str,
+    count: int = 5,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[Location]:
+    if client is not None:
+        return await _search_locations(client, query, count)
+    async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "MouvAir/0.3"}) as owned:
+        return await _search_locations(owned, query, count)
 
 
 def _unix_timestamp(value: object) -> int | None:
@@ -314,7 +385,9 @@ def _assemble_forecast(
     )
 
 
-async def get_forecast(latitude: float, longitude: float) -> ForecastResponse:
+async def _get_forecast(
+    client: httpx.AsyncClient, latitude: float, longitude: float
+) -> ForecastResponse:
     common_params: dict[str, Any] = {
         "latitude": latitude,
         "longitude": longitude,
@@ -325,10 +398,66 @@ async def get_forecast(latitude: float, longitude: float) -> ForecastResponse:
     weather_params = {**common_params, "hourly": ",".join(WEATHER_FIELDS)}
     air_params = {**common_params, "hourly": ",".join(AIR_FIELDS)}
 
-    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "MouvAir/0.2"}) as client:
-        weather, air = await asyncio.gather(
-            _get_json(client, FORECAST_URL, weather_params),
-            _get_json(client, AIR_QUALITY_URL, air_params),
-        )
+    weather, air = await asyncio.gather(
+        _get_json(client, FORECAST_URL, weather_params),
+        _get_json(client, AIR_QUALITY_URL, air_params),
+    )
 
     return _assemble_forecast(weather, air, datetime.now(UTC))
+
+
+async def get_forecast(
+    latitude: float,
+    longitude: float,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> ForecastResponse:
+    if client is not None:
+        return await _get_forecast(client, latitude, longitude)
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "MouvAir/0.3"}) as owned:
+        return await _get_forecast(owned, latitude, longitude)
+
+
+class OpenMeteoGateway:
+    """Réserve le budget partagé avant chaque opération auprès du fournisseur."""
+
+    def __init__(self, quota: QuotaGuard, client: httpx.AsyncClient) -> None:
+        self._quota = quota
+        self._client = client
+
+    async def search_locations(self, query: str, count: int = 5) -> list[Location]:
+        await self._reserve(1)
+        try:
+            return await search_locations(query, count, client=self._client)
+        except OpenMeteoProviderRateLimit as exc:
+            await self._quota.block_for(exc.retry_after)
+            raise OpenMeteoQuotaError(
+                "La recherche de villes est temporairement limitée",
+                exc.retry_after,
+            ) from exc
+
+    async def get_forecast(self, latitude: float, longitude: float) -> ForecastResponse:
+        # Les deux unités sont réservées ensemble pour ne jamais lancer une prévision partielle.
+        await self._reserve(2)
+        try:
+            return await get_forecast(latitude, longitude, client=self._client)
+        except OpenMeteoProviderRateLimit as exc:
+            await self._quota.block_for(exc.retry_after)
+            raise OpenMeteoQuotaError(
+                "Les prévisions sont temporairement limitées",
+                exc.retry_after,
+            ) from exc
+
+    async def _reserve(self, cost: int) -> None:
+        try:
+            await self._quota.reserve(cost)
+        except RateLimitExceeded as exc:
+            raise OpenMeteoQuotaError(
+                "Le budget Open-Meteo est temporairement atteint",
+                exc.retry_after,
+            ) from exc
+        except RateLimitBackendUnavailable as exc:
+            raise OpenMeteoQuotaError(
+                "La protection du quota Open-Meteo est temporairement indisponible",
+                5,
+            ) from exc

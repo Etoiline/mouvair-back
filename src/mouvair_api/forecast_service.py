@@ -1,10 +1,12 @@
 import asyncio
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .forecast_cache import SharedForecastCache
 from .models import (
     Conditions,
     ForecastDataState,
@@ -13,7 +15,8 @@ from .models import (
     PollenForecast,
     SlotConditions,
 )
-from .open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour, get_forecast
+from .open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour
+from .redis_store import RedisUnavailable
 from .scoring import calculate_score
 
 CACHE_TTL = timedelta(minutes=15)
@@ -126,16 +129,18 @@ class ForecastService:
 
     def __init__(
         self,
-        fetcher: ForecastFetcher | None = None,
+        fetcher: ForecastFetcher,
         *,
         clock: Clock | None = None,
         max_entries: int = CACHE_MAX_ENTRIES,
+        shared_cache: SharedForecastCache | None = None,
     ) -> None:
         if max_entries < 1:
             raise ValueError("Le cache doit accepter au moins une position")
-        self._fetcher = fetcher or get_forecast
+        self._fetcher = fetcher
         self._clock = clock or _utc_now
         self._max_entries = max_entries
+        self._shared_cache = shared_cache
         self._cache: OrderedDict[CacheKey, CacheEntry] = OrderedDict()
         self._inflight: dict[CacheKey, asyncio.Task[ForecastResponse]] = {}
 
@@ -163,6 +168,18 @@ class ForecastService:
         while len(self._cache) > self._max_entries:
             self._cache.popitem(last=False)
         return entry
+
+    def _prefer_shared(
+        self,
+        key: CacheKey,
+        shared: ForecastResponse,
+        previous: CacheEntry | None,
+        now: datetime,
+    ) -> CacheEntry:
+        shared_retrieved_at = _retrieved_at(shared, now)
+        if previous is not None and previous.retrieved_at >= shared_retrieved_at:
+            return previous
+        return self._store(key, shared, now)
 
     @staticmethod
     def _age(entry: CacheEntry, now: datetime) -> timedelta:
@@ -209,12 +226,72 @@ class ForecastService:
 
         now = self._now()
         entry = self._store(key, forecast, now)
+        await self._store_shared(entry.forecast)
         return _windowed_response(
             entry.forecast,
             now,
             data_state="fresh",
             from_cache=False,
         )
+
+    async def _refresh_shared(
+        self,
+        key: CacheKey,
+        latitude: float,
+        longitude: float,
+        previous: CacheEntry | None,
+    ) -> ForecastResponse:
+        if self._shared_cache is None:
+            return await self._refresh(key, latitude, longitude, previous)
+
+        try:
+            token = await self._shared_cache.acquire_lock(latitude, longitude)
+        except RedisUnavailable:
+            return await self._refresh(key, latitude, longitude, previous)
+
+        if token is None:
+            try:
+                shared = await self._shared_cache.wait(latitude, longitude)
+            except RedisUnavailable:
+                shared = None
+            if shared is None:
+                if previous is not None:
+                    return self._fallback(previous, self._now())
+                raise OpenMeteoError(
+                    "Une récupération identique est déjà en cours, veuillez réessayer"
+                )
+            now = self._now()
+            entry = self._prefer_shared(key, shared, previous, now)
+            cached = self._fresh_cache_response(entry, now)
+            return cached or self._fallback(entry, self._now())
+
+        try:
+            shared = await self._load_shared(latitude, longitude)
+            if shared is not None:
+                previous = self._prefer_shared(key, shared, previous, self._now())
+                cached = self._fresh_cache_response(previous, self._now())
+                if cached is not None:
+                    return cached
+            return await self._refresh(key, latitude, longitude, previous)
+        finally:
+            with suppress(RedisUnavailable):
+                await self._shared_cache.release_lock(latitude, longitude, token)
+
+    async def _load_shared(
+        self, latitude: float, longitude: float
+    ) -> ForecastResponse | None:
+        if self._shared_cache is None:
+            return None
+        try:
+            return await self._shared_cache.get(latitude, longitude)
+        except RedisUnavailable:
+            return None
+
+    async def _store_shared(self, forecast: ForecastResponse) -> None:
+        if self._shared_cache is None:
+            return
+        with suppress(RedisUnavailable):
+            await self._shared_cache.set(forecast)
 
     def _clear_inflight(self, key: CacheKey, task: asyncio.Task[ForecastResponse]) -> None:
         if self._inflight.get(key) is task:
@@ -231,12 +308,19 @@ class ForecastService:
             if cached_response is not None:
                 return cached_response
 
+        shared = await self._load_shared(latitude, longitude)
+        if shared is not None:
+            previous = self._prefer_shared(key, shared, previous, now)
+        if previous is not None:
+            cached_response = self._fresh_cache_response(previous, now)
+            if cached_response is not None:
+                return cached_response
+
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._refresh(key, latitude, longitude, previous))
+            task = asyncio.create_task(
+                self._refresh_shared(key, latitude, longitude, previous)
+            )
             self._inflight[key] = task
             task.add_done_callback(lambda finished: self._clear_inflight(key, finished))
         return await asyncio.shield(task)
-
-
-forecast_service = ForecastService()

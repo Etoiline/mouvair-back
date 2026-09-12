@@ -38,6 +38,34 @@ class SequencedFetcher:
         return outcome
 
 
+class SharedForecastCache:
+    def __init__(self) -> None:
+        self.forecast: ForecastResponse | None = None
+        self.locked = False
+
+    async def get(self, latitude: float, longitude: float) -> ForecastResponse | None:
+        del latitude, longitude
+        return self.forecast
+
+    async def set(self, forecast: ForecastResponse) -> None:
+        self.forecast = forecast
+
+    async def acquire_lock(self, latitude: float, longitude: float) -> str | None:
+        del latitude, longitude
+        if self.locked:
+            return None
+        self.locked = True
+        return "token"
+
+    async def release_lock(self, latitude: float, longitude: float, token: str) -> None:
+        del latitude, longitude, token
+        self.locked = False
+
+    async def wait(self, latitude: float, longitude: float) -> ForecastResponse | None:
+        del latitude, longitude
+        return self.forecast
+
+
 def forecast_at(
     retrieved_at: datetime,
     *,
@@ -268,3 +296,37 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     asyncio.run(scenario())
 
     assert list(service._cache) == [(1, 1), (3, 3)]
+
+
+def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
+    moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    shared = SharedForecastCache()
+    calls = 0
+
+    async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
+        nonlocal calls
+        calls += 1
+        return forecast_at(moment, latitude=latitude, longitude=longitude)
+
+    first = ForecastService(
+        fetcher,
+        clock=MutableClock(moment),
+        shared_cache=shared,
+    )
+    second = ForecastService(
+        fetcher,
+        clock=MutableClock(moment),
+        shared_cache=shared,
+    )
+
+    async def scenario() -> tuple[ForecastResponse, ForecastResponse]:
+        direct = await first.get_forecast(45.75, 4.85)
+        cached = await second.get_forecast(45.75, 4.85)
+        return direct, cached
+
+    direct, cached = asyncio.run(scenario())
+
+    assert calls == 1
+    assert direct.from_cache is False
+    assert cached.from_cache is True
+    assert cached.generated_at == direct.generated_at

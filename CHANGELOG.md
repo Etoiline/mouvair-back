@@ -1,5 +1,7 @@
 # Changelog
 
+- Add Redis-backed Open-Meteo quota reservations, shared geocoding and forecast caches, distributed locks, per-client rate limits, fail-closed degradation, and real Redis integration coverage.
+
 ## 0.3.0 - 2026-09-09
 
 - Remove deprecated flat sport-score fields and expose weather, air, and overall results only through their nested sections.
