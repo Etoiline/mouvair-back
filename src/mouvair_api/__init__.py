@@ -1,4 +1,4 @@
 """Mouv'Air API."""
 """Package principal de l’API Mouv’Air."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
