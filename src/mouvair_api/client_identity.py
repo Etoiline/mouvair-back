@@ -38,11 +38,27 @@ def _forwarded_addresses(request: Request) -> tuple[str, ...] | None:
     return tuple(addresses) or None
 
 
+def _real_address(request: Request) -> str | None:
+    values = request.headers.getlist("X-Real-IP")
+    if len(values) != 1:
+        return None
+    try:
+        return str(ipaddress.ip_address(values[0].strip()))
+    except ValueError:
+        return None
+
+
 def _proxied_client_address(
     request: Request,
     direct_address: str,
     trusted_proxy_cidrs: tuple[str, ...],
 ) -> str:
+    # Railway fournit une adresse unique et normalisée dans X-Real-IP. Elle n'est
+    # acceptée que lorsque le pair directement connecté est un proxy de confiance.
+    real_address = _real_address(request)
+    if real_address is not None:
+        return real_address
+
     forwarded = _forwarded_addresses(request)
     if forwarded is None:
         return direct_address

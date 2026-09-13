@@ -79,7 +79,8 @@ consomment aucune unité.
 Les limites entrantes par identité client sont de 120 recherches de villes par minute et 1 200 par
 heure, puis 40 demandes de prévisions par minute et 240 par heure. Elles s’appliquent aussi aux cache
 hits. L’identité est dérivée par HMAC de l’adresse du client ; `X-Forwarded-For` n’est utilisé que si
-le proxy direct appartient à `TRUSTED_PROXY_CIDRS`.
+le proxy direct appartient à `TRUSTED_PROXY_CIDRS`. L’en-tête unique `X-Real-IP`, fourni notamment
+par Railway, est accepté selon la même règle et prend alors la priorité.
 
 Une limite client renvoie `429` avec `Retry-After`. Lorsque le budget global ou sa protection sont
 indisponibles, une donnée déjà en cache reste servie ; une opération nécessitant Open-Meteo renvoie
@@ -132,6 +133,30 @@ La commande `ping` doit répondre `PONG`. Les tests marqués `redis_integration`
 nettoient leurs clés et vérifient les réservations concurrentes, les verrous, le délai partagé et
 `/health`. `docker compose stop redis` arrête le service sans supprimer le volume persistant, tandis
 que `docker compose down -v` supprimerait aussi les données Redis locales.
+
+## Déploiement sur Railway
+
+Le `Dockerfile` lance l’API sur le port injecté par Railway. Pour déployer la production :
+
+1. créer un projet Railway et y ajouter un service Redis privé avec un volume monté sur `/data` ;
+2. activer l’AOF avec `appendfsync everysec` et la politique `noeviction` sur ce service ;
+3. connecter ce dépôt GitHub au service API ;
+4. configurer `/health` comme chemin de vérification ;
+5. générer un domaine public uniquement pour l’API.
+
+Variables minimales du service API :
+
+```dotenv
+FRONTEND_ORIGINS=https://mouvair.example.dev
+REDIS_URL=${{Redis.REDIS_URL}}
+REDIS_FAILURE_MODE=closed
+CLIENT_ID_HMAC_SECRET=replace-with-a-long-random-secret
+TRUSTED_PROXY_CIDRS=10.0.0.0/8,100.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
+```
+
+La valeur de `CLIENT_ID_HMAC_SECRET` doit être générée dans Railway et ne jamais être versionnée.
+Les réseaux de confiance ci-dessus sont réservés au déploiement Railway, dont le proxy renseigne
+`X-Real-IP`. Remplacer l’origine d’exemple par l’URL de production exacte du frontend.
 
 ## Créer une release
 
