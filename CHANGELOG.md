@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.4.0 - 2026-09-13
+
 - Add a production Docker image and safely support Railway's trusted client IP header.
 
 - Document the complete local Redis verification workflow with Docker and persistent volumes.
