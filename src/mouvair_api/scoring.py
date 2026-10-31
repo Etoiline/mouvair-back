@@ -55,10 +55,13 @@ class RawWeatherScore:
 
     La globale doit utiliser score, et non public.score, pour éviter qu’un arrondi
     intermédiaire change le résultat final. Les plafonds d’événements y sont réappliqués.
+    Les facteurs d’explication sont gardés à part pour adapter le texte après le
+    calcul de la globale, sans changer leur priorité ni les notes.
     """
     public: WeatherScore
     score: float | None
     event_caps: tuple[int, ...]
+    reason_factors: tuple[tuple[WeatherFactorId, bool], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -341,17 +344,17 @@ def _factor_reason(
     )
 
 
-def _weather_reasons(
+def _weather_reason_factors(
     factor_scores: dict[WeatherFactorId, float],
     profile: SportProfile,
     weighted_score: float,
-    alerts: list[str],
-) -> list[str]:
+) -> tuple[tuple[WeatherFactorId, bool], ...]:
     """Choisit au plus deux facteurs expliquant la dégradation de la météo.
 
     Un facteur qui impose le plafond le plus bas est prioritaire. Les suivants
     sont classés par perte pondérée ; l’ordre température, pluie, vent départage
     les égalités pour garantir des explications déterministes.
+    Le booléen indique le facteur qui impose le plafond, sans fixer encore le ton.
     """
     factor_order: tuple[WeatherFactorId, ...] = ("temperature", "rain", "wind")
     progressive_caps = {
@@ -388,11 +391,29 @@ def _weather_reasons(
         if len(selected) == 2:
             break
 
-    if not selected and not alerts:
+    return tuple(selected)
+
+
+def _weather_reasons(
+    weather: RawWeatherScore, overall: ScoreSummary, profile: SportProfile
+) -> list[str]:
+    """Accorde le ton aux appréciations météo et globale effectivement affichées.
+
+    Un plafond actif peut encore laisser des conditions correctes ou favorables.
+    « Fortement » exige donc que les deux appréciations soient sous « Correct ».
+    Une note absente ne justifie pas non plus cette intensité.
+    """
+    if weather.score is None:
+        return []
+    if not weather.reason_factors and not weather.public.alerts:
         return ["Conditions météo favorables pour cette activité."]
+    degraded_statuses = {"mitigé", "défavorable", "très défavorable"}
+    allow_strong = (
+        weather.public.status in degraded_statuses and overall.status in degraded_statuses
+    )
     return [
-        _factor_reason(factor_id, profile, strongly=strongly)
-        for factor_id, strongly in selected
+        _factor_reason(factor_id, profile, strongly=limits_score and allow_strong)
+        for factor_id, limits_score in weather.reason_factors
     ]
 
 
@@ -483,11 +504,12 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
             score=displayed_score,
             status=score_status(displayed_score),
             factors=factors,
-            reasons=_weather_reasons(factor_scores, profile, weighted_score, alerts),
+            reasons=[],
             alerts=alerts,
         ),
         score=raw_score,
         event_caps=event_caps,
+        reason_factors=_weather_reason_factors(factor_scores, profile, weighted_score),
     )
 
 
@@ -596,10 +618,13 @@ def _build_sport_score(
     """Assemble les trois sections publiques en gardant les calculs précis en interne."""
     weather = _calculate_weather(conditions, profile)
     overall = _calculate_overall(weather, air, profile)
+    weather_public = weather.public.model_copy(
+        update={"reasons": _weather_reasons(weather, overall, profile)}
+    )
     return SportScore(
         sport=profile.id,
         label=profile.label,
-        weather=weather.public,
+        weather=weather_public,
         air=air.public,
         overall=overall,
     )
