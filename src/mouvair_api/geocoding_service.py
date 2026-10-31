@@ -17,8 +17,8 @@ from time import monotonic
 from typing import Protocol
 
 from .config import Settings
+from .errors import DataUnavailableError
 from .models import Location
-from .open_meteo import OpenMeteoError
 from .redis_store import RedisUnavailable
 
 LocationFetcher = Callable[[str, int], Awaitable[list[Location]]]
@@ -139,7 +139,7 @@ class GeocodingService:
         if token is None:
             shared = await self._wait_for_shared(key)
             if shared is None:
-                raise OpenMeteoError(
+                raise DataUnavailableError(
                     "Une recherche identique est déjà en cours, veuillez réessayer"
                 )
             self._store_local(key, shared)

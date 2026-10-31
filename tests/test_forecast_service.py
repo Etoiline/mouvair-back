@@ -13,8 +13,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from mouvair_api.config import Settings
+from mouvair_api.errors import DataUnavailableError
 from mouvair_api.forecast_cache import RedisForecastCache
 from mouvair_api.forecast_service import ForecastService
+from mouvair_api.forecast_slots import SLOT_COUNT, SPORTS, next_full_hour
 from mouvair_api.models import (
     Conditions,
     ForecastResponse,
@@ -22,7 +24,6 @@ from mouvair_api.models import (
     PollenForecast,
     SlotConditions,
 )
-from mouvair_api.open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour
 from mouvair_api.redis_store import RedisStore
 from mouvair_api.scoring import calculate_score
 
@@ -40,7 +41,7 @@ class MutableClock:
 class SequencedFetcher:
     """Fournisseur déterministe renvoyant successivement des prévisions ou des erreurs."""
 
-    def __init__(self, *outcomes: ForecastResponse | OpenMeteoError) -> None:
+    def __init__(self, *outcomes: ForecastResponse | DataUnavailableError) -> None:
         """Conserve les issues et compte les vrais rafraîchissements demandés."""
         self.outcomes = outcomes
         self.calls = 0
@@ -49,7 +50,7 @@ class SequencedFetcher:
         """Consomme une issue par appel pour révéler un rafraîchissement superflu."""
         outcome = self.outcomes[self.calls]
         self.calls += 1
-        if isinstance(outcome, OpenMeteoError):
+        if isinstance(outcome, DataUnavailableError):
             raise outcome
         return outcome
 
@@ -67,7 +68,7 @@ def forecast_at(
     coordonnées, le fuseau et les résultats du fournisseur varient selon le test.
     """
     timezone = ZoneInfo(timezone_name)
-    first_start = _next_full_hour(retrieved_at, timezone)
+    first_start = next_full_hour(retrieved_at, timezone)
     hours = []
     for offset in range(SLOT_COUNT):
         start = first_start + timedelta(hours=offset)
@@ -181,7 +182,7 @@ def test_failed_refresh_keeps_recent_slots_and_fills_the_missing_hour() -> None:
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
         forecast_at(retrieved_at),
-        OpenMeteoError("indisponible"),
+        DataUnavailableError("indisponible"),
     )
     service = ForecastService(fetcher, clock=clock)
 
@@ -220,7 +221,7 @@ def test_failed_refresh_applies_the_one_hour_threshold(
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
         forecast_at(retrieved_at),
-        OpenMeteoError("indisponible"),
+        DataUnavailableError("indisponible"),
     )
     service = ForecastService(fetcher, clock=clock)
 
@@ -241,11 +242,11 @@ def test_provider_error_without_cached_data_is_propagated() -> None:
     """Sans historique disponible, le service doit laisser la route présenter l’erreur."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     service = ForecastService(
-        SequencedFetcher(OpenMeteoError("indisponible")),
+        SequencedFetcher(DataUnavailableError("indisponible")),
         clock=MutableClock(moment),
     )
 
-    with pytest.raises(OpenMeteoError, match="indisponible"):
+    with pytest.raises(DataUnavailableError, match="indisponible"):
         asyncio.run(service.get_forecast(45.75, 4.85))
 
 

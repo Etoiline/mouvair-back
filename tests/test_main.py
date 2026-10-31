@@ -5,11 +5,15 @@ remplacés dans app.state isolent les traductions HTTP du réseau fournisseur ;
 les configurations sans Redis exercent les modes local et closed.
 """
 
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 
 from mouvair_api.config import Settings
+from mouvair_api.forecast_service import ForecastService
+from mouvair_api.forecast_slots import assemble_forecast
 from mouvair_api.main import create_app
-from mouvair_api.models import Location
+from mouvair_api.models import ForecastResponse, Location
 from mouvair_api.open_meteo import OpenMeteoQuotaError
 
 
@@ -81,3 +85,19 @@ def test_location_client_limit_returns_429_and_keeps_clients_separate() -> None:
     assert first.status_code == 200
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) > 0
+
+
+def test_forecast_assembly_error_returns_502() -> None:
+    """Une erreur d’assemblage traverse le service et conserve sa traduction HTTP 502."""
+    async def invalid_forecast(latitude: float, longitude: float) -> ForecastResponse:
+        """Simule des réponses fournisseur vides sans effectuer de requête réseau."""
+        del latitude, longitude
+        return assemble_forecast({}, {}, datetime(2026, 9, 8, 12, tzinfo=UTC))
+
+    app = create_app(Settings(redis_failure_mode="local"))
+    with TestClient(app) as client:
+        app.state.forecast_service = ForecastService(invalid_forecast)
+        response = client.get("/api/forecast", params={"latitude": 45.75, "longitude": 4.85})
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Fuseau horaire absent de la réponse météo"}

@@ -17,11 +17,12 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .client_identity import client_identity
 from .config import Settings
+from .errors import DataUnavailableError
 from .forecast_cache import RedisForecastCache
 from .forecast_service import ForecastService
 from .geocoding_service import GeocodingService
 from .models import ForecastResponse, Location
-from .open_meteo import OpenMeteoError, OpenMeteoGateway, OpenMeteoQuotaError
+from .open_meteo import OpenMeteoGateway, OpenMeteoQuotaError
 from .rate_limit import ClientRateLimiter, OpenMeteoQuota, RateLimitExceeded
 from .redis_store import RedisStore
 
@@ -134,7 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=str(exc),
                 headers={"Retry-After": str(exc.retry_after)},
             ) from exc
-        except OpenMeteoError as exc:
+        except DataUnavailableError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @application.get("/api/forecast", response_model=ForecastResponse)
@@ -158,7 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=str(exc),
                 headers={"Retry-After": str(exc.retry_after)},
             ) from exc
-        except OpenMeteoError as exc:
+        except DataUnavailableError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         if not result.hours:
