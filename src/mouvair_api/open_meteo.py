@@ -6,13 +6,16 @@ forecast_slots pour construire les créneaux et leurs notes.
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from math import ceil
+from time import perf_counter
 from typing import Any, Protocol
 
 import httpx
 
+from .diagnostics import error_fields, log_event
 from .errors import DataUnavailableError
 from .forecast_slots import AIR_FIELDS, WEATHER_FIELDS, assemble_forecast
 from .models import ForecastResponse, Location
@@ -89,6 +92,11 @@ async def _get_json(
     Le cas 429 reste identifiable par la passerelle. Un JSON valide doit encore
     être un objet ; les champs attendus sont contrôlés lors de leur utilisation.
     """
+    started = perf_counter()
+    # Un nom fixe suffit au diagnostic ; l’URL encodée contiendrait les coordonnées ou la saisie.
+    operation = {
+        GEOCODING_URL: "locations", FORECAST_URL: "weather", AIR_QUALITY_URL: "air_quality",
+    }.get(url, "unknown")
     try:
         if timeout is None:
             response = await client.get(url, params=params)
@@ -96,19 +104,44 @@ async def _get_json(
             response = await client.get(url, params=params, timeout=timeout)
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        log_event(
+            "provider.request_failed", level=logging.WARNING, operation=operation,
+            reason="http_error", provider_status=exc.response.status_code,
+            duration_ms=round((perf_counter() - started) * 1_000, 3), **error_fields(exc),
+        )
         if exc.response.status_code == 429:
             raise OpenMeteoProviderRateLimit(_provider_retry_after(exc.response)) from exc
         raise OpenMeteoError("Open-Meteo est momentanément indisponible") from exc
     except httpx.HTTPError as exc:
+        log_event(
+            "provider.request_failed", level=logging.WARNING, operation=operation,
+            reason="network_error", provider_status=None,
+            duration_ms=round((perf_counter() - started) * 1_000, 3), **error_fields(exc),
+        )
         raise OpenMeteoError("Open-Meteo est momentanément indisponible") from exc
 
     try:
         payload = response.json()
     except ValueError as exc:
+        log_event(
+            "provider.request_failed", level=logging.WARNING, operation=operation,
+            reason="invalid_json", provider_status=response.status_code,
+            duration_ms=round((perf_counter() - started) * 1_000, 3), **error_fields(exc),
+        )
         raise OpenMeteoError("Réponse Open-Meteo invalide") from exc
 
     if not isinstance(payload, dict):
+        log_event(
+            "provider.request_failed", level=logging.WARNING, operation=operation,
+            reason="invalid_payload", provider_status=response.status_code,
+            duration_ms=round((perf_counter() - started) * 1_000, 3),
+        )
         raise OpenMeteoError("Réponse Open-Meteo invalide")
+    log_event(
+        "provider.request", level=logging.DEBUG, operation=operation,
+        provider_status=response.status_code,
+        duration_ms=round((perf_counter() - started) * 1_000, 3),
+    )
     return payload
 
 
@@ -219,6 +252,10 @@ class OpenMeteoGateway:
         try:
             return await search_locations(query, count, client=self._client)
         except OpenMeteoProviderRateLimit as exc:
+            log_event(
+                "provider.rate_limited", level=logging.WARNING,
+                operation="locations", retry_after=exc.retry_after,
+            )
             await self._quota.block_for(exc.retry_after)
             raise OpenMeteoQuotaError(
                 "La recherche de villes est temporairement limitée",
@@ -232,6 +269,10 @@ class OpenMeteoGateway:
         try:
             return await get_forecast(latitude, longitude, client=self._client)
         except OpenMeteoProviderRateLimit as exc:
+            log_event(
+                "provider.rate_limited", level=logging.WARNING,
+                operation="forecast", retry_after=exc.retry_after,
+            )
             await self._quota.block_for(exc.retry_after)
             raise OpenMeteoQuotaError(
                 "Les prévisions sont temporairement limitées",
@@ -243,11 +284,19 @@ class OpenMeteoGateway:
         try:
             await self._quota.reserve(cost)
         except RateLimitExceeded as exc:
+            log_event(
+                "provider.quota_rejected", level=logging.WARNING,
+                reason="quota_or_cooldown", cost=cost, retry_after=exc.retry_after,
+            )
             raise OpenMeteoQuotaError(
                 "Le budget Open-Meteo est temporairement atteint",
                 exc.retry_after,
             ) from exc
         except RateLimitBackendUnavailable as exc:
+            log_event(
+                "provider.quota_rejected", level=logging.WARNING,
+                reason="redis_unavailable", cost=cost, retry_after=5,
+            )
             raise OpenMeteoQuotaError(
                 "La protection du quota Open-Meteo est temporairement indisponible",
                 5,

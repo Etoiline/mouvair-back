@@ -7,6 +7,7 @@ les états de repli et les limites HTTP sans appeler Open-Meteo.
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -107,8 +108,10 @@ def test_forecast_reuses_the_requested_position_without_changing_generation_time
     forecast_client: TestClient,
     forecast_clock: MutableClock,
     forecast_fetcher: SequencedFetcher,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Une seconde requête sert le cache malgré des coordonnées fournisseur différentes."""
+    caplog.set_level(logging.INFO, logger="mouvair_api")
     params = {"latitude": 45.75, "longitude": 4.85}
     first = forecast_client.get("/api/forecast", params=params)
     forecast_clock.value += timedelta(minutes=15)
@@ -118,6 +121,20 @@ def test_forecast_reuses_the_requested_position_without_changing_generation_time
     assert first.json()["from_cache"] is False
     assert second.json() == {**first.json(), "from_cache": True}
     assert forecast_fetcher.calls == 1
+    requests = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "http.request"
+    ]
+    outcomes = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api"
+        and record.getMessage() in {"forecast.refreshed", "forecast.cache_hit"}
+    ]
+    assert len(requests) == len(outcomes) == 2
+    assert [item["source"] for item in outcomes] == ["provider", "memory"]
+    assert outcomes[0]["request_id"] == requests[0]["request_id"]
+    assert outcomes[1]["request_id"] == requests[1]["request_id"]
+    assert requests[0]["request_id"] != requests[1]["request_id"]
 
 
 @pytest.mark.parametrize(

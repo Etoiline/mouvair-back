@@ -6,6 +6,7 @@ un stockage mémoire partagé pour vérifier les échanges entre deux instances.
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -329,8 +330,10 @@ def test_shared_refresh_timeout_preserves_the_previous_forecast(
     age: timedelta,
     state: str,
     recommendation_available: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """À l’expiration de l’attente, le repli conserve l’âge et les créneaux connus."""
+    caplog.set_level(logging.INFO, logger="mouvair_api")
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     previous = forecast_at(retrieved_at)
     cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
@@ -355,6 +358,17 @@ def test_shared_refresh_timeout_preserves_the_previous_forecast(
     assert fallback.recommendation_available is recommendation_available
     assert fallback.generated_at == previous.generated_at
     assert len(fallback.hours) == SLOT_COUNT
+    wait_events = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "forecast.shared_wait"
+    ]
+    fallback_events = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "forecast.fallback"
+    ]
+    assert len(wait_events) == len(fallback_events) == 1
+    assert wait_events[0]["outcome"] == "timeout"
+    assert fallback_events[0]["reason"] == "shared_refresh_timeout"
 
 
 def test_shared_refresh_timeout_without_previous_forecast_does_not_duplicate_the_fetch(

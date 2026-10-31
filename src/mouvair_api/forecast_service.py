@@ -7,13 +7,16 @@ tentée. En cas d’échec fournisseur, les anciennes heures sont replacées dan
 """
 
 import asyncio
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from zoneinfo import ZoneInfo
 
+from .diagnostics import error_fields, log_event
 from .errors import DataUnavailableError
 from .forecast_cache import SharedForecastCache
 from .forecast_slots import SLOT_COUNT, SPORTS, next_full_hour
@@ -234,31 +237,42 @@ class ForecastService:
         return max(now - entry.retrieved_at, timedelta())
 
     def _fresh_cache_response(
-        self, entry: CacheEntry, now: datetime
+        self, entry: CacheEntry, now: datetime, *, source: str
     ) -> ForecastResponse | None:
         """Réutilise seulement les données de 15 minutes au plus couvrant la fenêtre."""
         if self._age(entry, now) > CACHE_TTL:
             return None
         if not _covers_requested_window(entry.forecast, now):
             return None
-        return _windowed_response(
+        response = _windowed_response(
             entry.forecast,
             now,
             data_state="fresh",
             from_cache=True,
         )
+        log_event(
+            "forecast.cache_hit", source=source, data_state="fresh",
+            age_seconds=round(self._age(entry, now).total_seconds(), 3),
+        )
+        return response
 
-    def _fallback(self, entry: CacheEntry, now: datetime) -> ForecastResponse:
+    def _fallback(self, entry: CacheEntry, now: datetime, *, reason: str) -> ForecastResponse:
         """Classe le repli selon le seuil inclusif d’une heure et réajuste ses départs."""
         state: ForecastDataState = (
             "refresh_failed" if self._age(entry, now) <= STALE_AFTER else "stale"
         )
-        return _windowed_response(
+        response = _windowed_response(
             entry.forecast,
             now,
             data_state=state,
             from_cache=True,
         )
+        log_event(
+            "forecast.fallback", level=logging.WARNING, source="cache", reason=reason,
+            data_state=state, age_seconds=round(self._age(entry, now).total_seconds(), 3),
+            recommendation_available=response.recommendation_available,
+        )
+        return response
 
     async def _refresh(
         self,
@@ -272,22 +286,34 @@ class ForecastService:
         Seules les erreurs attendues du fournisseur déclenchent le repli. Sans
         donnée antérieure, elles remontent jusqu’à la traduction HTTP de la route.
         """
+        started = perf_counter()
         try:
             forecast = await self._fetcher(latitude, longitude)
-        except DataUnavailableError:
+        except DataUnavailableError as exc:
+            log_event(
+                "forecast.refresh_failed", level=logging.WARNING, source="provider",
+                duration_ms=round((perf_counter() - started) * 1_000, 3),
+                has_previous=previous is not None, **error_fields(exc),
+            )
             if previous is None:
                 raise
-            return self._fallback(previous, self._now())
+            return self._fallback(previous, self._now(), reason="provider_error")
 
+        provider_duration_ms = round((perf_counter() - started) * 1_000, 3)
         now = self._now()
         entry = self._store(key, forecast, now)
         await self._store_shared(key, entry.forecast)
-        return _windowed_response(
+        response = _windowed_response(
             entry.forecast,
             now,
             data_state="fresh",
             from_cache=False,
         )
+        log_event(
+            "forecast.refreshed", source="provider", duration_ms=provider_duration_ms,
+            data_state="fresh", age_seconds=round(self._age(entry, now).total_seconds(), 3),
+        )
+        return response
 
     async def _refresh_shared(
         self,
@@ -312,6 +338,8 @@ class ForecastService:
 
         if token is None:
             # Une autre instance possède le verrou ; attendre son résultat évite un doublon.
+            started = perf_counter()
+            wait_outcome = "timeout"
             try:
                 shared = await self._shared_cache.wait(
                     latitude,
@@ -320,23 +348,34 @@ class ForecastService:
                 )
             except RedisUnavailable:
                 shared = None
+                wait_outcome = "redis_unavailable"
+            log_event(
+                "forecast.shared_wait", source="redis",
+                level=logging.INFO if shared is not None else logging.WARNING,
+                outcome="ready" if shared is not None else wait_outcome,
+                duration_ms=round((perf_counter() - started) * 1_000, 3),
+            )
             if shared is None:
                 if previous is not None:
-                    return self._fallback(previous, self._now())
+                    reason = (
+                        "redis_unavailable" if wait_outcome == "redis_unavailable"
+                        else "shared_refresh_timeout"
+                    )
+                    return self._fallback(previous, self._now(), reason=reason)
                 raise DataUnavailableError(
                     "Une récupération identique est déjà en cours, veuillez réessayer"
                 )
             now = self._now()
             entry = self._prefer_shared(key, shared, previous, now)
-            cached = self._fresh_cache_response(entry, now)
-            return cached or self._fallback(entry, self._now())
+            cached = self._fresh_cache_response(entry, now, source="redis")
+            return cached or self._fallback(entry, self._now(), reason="shared_result_not_fresh")
 
         try:
             # Relire après acquisition ferme la course entre la première lecture et le verrou.
             shared = await self._load_shared(latitude, longitude)
             if shared is not None:
                 previous = self._prefer_shared(key, shared, previous, self._now())
-                cached = self._fresh_cache_response(previous, self._now())
+                cached = self._fresh_cache_response(previous, self._now(), source="redis")
                 if cached is not None:
                     return cached
             return await self._refresh(key, latitude, longitude, previous)
@@ -383,7 +422,7 @@ class ForecastService:
         now = self._now()
         previous = self._cached(key)
         if previous is not None:
-            cached_response = self._fresh_cache_response(previous, now)
+            cached_response = self._fresh_cache_response(previous, now, source="memory")
             if cached_response is not None:
                 return cached_response
 
@@ -391,7 +430,7 @@ class ForecastService:
         if shared is not None:
             previous = self._prefer_shared(key, shared, previous, now)
         if previous is not None:
-            cached_response = self._fresh_cache_response(previous, now)
+            cached_response = self._fresh_cache_response(previous, now, source="redis")
             if cached_response is not None:
                 return cached_response
 
@@ -402,5 +441,7 @@ class ForecastService:
             )
             self._inflight[key] = task
             task.add_done_callback(lambda finished: self._clear_inflight(key, finished))
+        else:
+            log_event("forecast.coalesced", source="memory")
         # La déconnexion d’un demandeur ne doit pas annuler le travail attendu par les autres.
         return await asyncio.shield(task)

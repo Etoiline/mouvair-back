@@ -23,6 +23,7 @@ notamment les plafonds, les bornes temporelles et la coordination entre requête
 |---|---|
 | `__init__.py` | Version du package, synchronisée par le script de release. |
 | `main.py` | Construction de FastAPI, cycle de vie des connexions, CORS, routes et erreurs HTTP. |
+| `diagnostics.py` | Événements JSON, contexte de requête et mesure du traitement HTTP. |
 | `config.py` | Configuration immuable, lecture de l’environnement et validation des limites. |
 | `models.py` | Contrat Pydantic des villes, mesures, pollens, scores et prévisions. |
 | `open_meteo.py` | Appels HTTP fournisseur, géocodage, paramètres, erreurs réseau et quota. |
@@ -88,6 +89,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
 | `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
 | `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
+| `test_diagnostics.py` | Journaux JSON, durées, sources, replis et contexte concurrent des requêtes. |
 | `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
 | `test_redis_integration.py` | Atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
 
@@ -224,6 +226,50 @@ Une production doit employer des garanties de persistance équivalentes, supervi
 utiliser Redis 7.2 ou ultérieur comme stockage faisant autorité plutôt qu’une réplication à
 cohérence éventuelle.
 
+## Journaux de diagnostic
+
+Les événements applicatifs sont écrits en JSON sur la sortie d’erreur, à raison d’une ligne par
+événement, et sont accessibles avec `docker compose logs -f api`. Leur configuration est activée
+au démarrage de FastAPI, une seule fois par processus, avec le niveau `INFO` par défaut.
+Un gestionnaire ou un niveau déjà défini sur le logger Python `mouvair_api` est conservé.
+
+Chaque requête HTTP reçoit un `request_id` interne. Les événements des services et des tâches
+asynchrones qu’elle déclenche conservent cet identifiant ; deux requêtes concurrentes ont des
+identifiants distincts. Hors d’une requête HTTP, par exemple pendant la connexion initiale à Redis,
+`request_id` vaut `null`. Aucun champ n’est ajouté au contrat JSON des prévisions.
+
+| Événement | Informations utiles |
+|---|---|
+| `http.request` | Méthode, chemin, statut, durée totale en millisecondes et issue du traitement. |
+| `http.client_limited` | Route concernée et délai `retry_after` d’un refus client 429. |
+| `forecast.cache_hit` | Source `memory` ou `redis`, état de fraîcheur et `age_seconds`. |
+| `forecast.refreshed` | Source `provider`, durée du chargement et âge réel des données reçues. |
+| `forecast.refresh_failed` | Type d’erreur, cause technique, délai éventuel et présence d’un historique. |
+| `forecast.fallback` | Motif du repli, âge, état `refresh_failed` ou `stale`, recommandation disponible. |
+| `forecast.shared_wait` | Durée et issue de l’attente d’une autre instance. |
+| `forecast.coalesced`, `geocoding.coalesced` | Une requête rejoint une tâche locale déjà en cours. |
+| `geocoding.cache_hit`, `geocoding.fetched` | Source, nombre de résultats et durée du chargement fournisseur. |
+| `geocoding.fetch_failed`, `geocoding.shared_wait` | Échec fournisseur ou attente d’une autre instance. |
+| `provider.request_failed` | Opération météo, air ou villes, cause réseau/HTTP/JSON et statut fournisseur. |
+| `provider.quota_rejected`, `provider.rate_limited` | Refus de budget ou limitation fournisseur, coût et délai. |
+| `forecast.cache_invalid`, `geocoding.cache_invalid` | Entrée L2 invalide et type d’erreur détecté. |
+| `redis.unavailable`, `redis.restored` | Transitions de disponibilité, sans répéter chaque tentative refusée. |
+
+Les replis portent `source: "cache"`, car ils réutilisent un historique déjà connu. Leur motif
+est `provider_error`, `shared_refresh_timeout`, `redis_unavailable` ou `shared_result_not_fresh`.
+Un HTTP 200 accompagné d’un événement `forecast.fallback` correspond donc à des données conservées
+après un échec, avec leur âge réel, plutôt qu’à une nouvelle récupération réussie.
+
+Les événements HTTP ne recopient que le chemin, sans paramètres. Les événements métier ne
+recopient ni ville saisie, ni coordonnées, ni contenu fournisseur. Les échecs décrivent les types
+d’exception et leurs causes sans journaliser leurs messages bruts. Le `Dockerfile` et la commande
+Uvicorn ci-dessous utilisent `--no-access-log` pour laisser ces événements assurer le suivi HTTP.
+
+Les refus HTTP attendus, les replis et les entrées invalides utilisent `WARNING` ; une exception
+HTTP non gérée utilise `ERROR`. Les requêtes `/health`, les prérequêtes CORS réussies et le détail
+des appels fournisseur réussis sont en `DEBUG` pour conserver des journaux courants lisibles.
+L’hébergeur peut activer ce niveau sur le logger `mouvair_api` pour une investigation détaillée.
+
 ## Commandes
 
 ### API et Redis avec Docker
@@ -277,7 +323,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d redis
-.\.venv\Scripts\python.exe -m uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env
+.\.venv\Scripts\python.exe -m uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env --no-access-log
 ```
 
 Remplacer `CLIENT_ID_HMAC_SECRET` dans `.env` par une valeur aléatoire longue avant d’exposer

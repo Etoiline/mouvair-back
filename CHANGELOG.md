@@ -1,5 +1,7 @@
 # Changelog
 
+- Add structured JSON diagnostics with request correlation, timings, cache sources, fallback reasons, provider failures, quotas and Redis availability events.
+
 - Validate cached forecast timezones, offset-aware timestamps and one-hour slots, discard invalid entries, and preserve valid fallback data.
 
 - Apply CORS to client rate-limit responses and expose Retry-After so browsers can read 429 errors and retry delays.
