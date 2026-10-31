@@ -280,7 +280,7 @@ class ForecastService:
 
         now = self._now()
         entry = self._store(key, forecast, now)
-        await self._store_shared(entry.forecast)
+        await self._store_shared(key, entry.forecast)
         return _windowed_response(
             entry.forecast,
             now,
@@ -350,12 +350,16 @@ class ForecastService:
         except RedisUnavailable:
             return None
 
-    async def _store_shared(self, forecast: ForecastResponse) -> None:
-        """Écrit le L2 sans perdre une réponse fournisseur valide si Redis tombe en panne."""
+    async def _store_shared(self, key: CacheKey, forecast: ForecastResponse) -> None:
+        """Écrit le L2 avec la même position demandée que le L1 et le verrou.
+
+        La clé d’origine accompagne la réponse, dont les coordonnées fournisseur
+        peuvent différer. Une panne Redis ne fait pas perdre ce résultat valide.
+        """
         if self._shared_cache is None:
             return
         with suppress(RedisUnavailable):
-            await self._shared_cache.set(forecast)
+            await self._shared_cache.set(latitude=key[0], longitude=key[1], forecast=forecast)
 
     def _clear_inflight(self, key: CacheKey, task: asyncio.Task[ForecastResponse]) -> None:
         """Retire uniquement la tâche terminée et récupère son éventuelle exception.
