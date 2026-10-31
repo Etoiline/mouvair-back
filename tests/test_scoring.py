@@ -132,7 +132,7 @@ def test_wind_and_gust_combination(
 
 
 def test_progressive_rain_cap_limits_cycling_weather() -> None:
-    """Une pluie notée 35 limite le vélo à 55 et doit devenir la première explication."""
+    """La pluie plafonne la météo à 55, mais une globale correcte garde un ton modéré."""
     result = calculate_score(
         conditions(
             apparent_temperature=20,
@@ -143,6 +143,48 @@ def test_progressive_rain_cap_limits_cycling_weather() -> None:
         "cycling",
     )
     assert result.weather.score == 55
+    assert result.overall.score == 64
+    assert result.overall.status == "correct"
+    assert result.weather.reasons[0] == (
+        "Les précipitations prévues pénalisent ce créneau pour le vélo."
+    )
+
+
+@pytest.mark.parametrize(
+    ("sport", "overrides", "expected_status"),
+    [
+        ("walking", {"apparent_temperature": 0}, "correct"),
+        ("cycling", {"precipitation": 1}, "correct"),
+        ("cycling", {"precipitation": 1, "european_aqi": 30}, "correct"),
+        ("cycling", {"wind_speed": 20, "wind_gusts": 20}, "correct"),
+        ("walking", {"apparent_temperature": 5}, "favorable"),
+        ("cycling", {"precipitation": 0.1}, "favorable"),
+        ("cycling", {"wind_speed": 12, "wind_gusts": 12}, "favorable"),
+        ("cycling", {"precipitation": 1, "european_aqi": None}, "incomplet"),
+    ],
+)
+def test_weather_explanations_match_overall_appreciation(
+    sport: SportId, overrides: dict[str, object], expected_status: str
+) -> None:
+    """Un plafond thermique, de pluie ou de vent ne suffit pas à annoncer une forte gêne."""
+    result = calculate_score(conditions(**overrides), sport)
+    assert result.overall.status == expected_status
+    assert result.weather.reasons
+    assert all("fortement" not in reason for reason in result.weather.reasons)
+
+
+@pytest.mark.parametrize(("aqi", "expected_overall"), [(60, 51), (30.1, 59)])
+def test_limiting_rain_keeps_emphasis_when_weather_and_overall_are_degraded(
+    aqi: float, expected_overall: int
+) -> None:
+    """Une météo et une globale mitigées conservent l’intensité du facteur limitant."""
+    result = calculate_score(
+        conditions(precipitation=1, european_aqi=aqi),
+        "cycling",
+    )
+    assert result.weather.score == 55
+    assert result.overall.score == expected_overall
+    assert result.weather.status == result.overall.status == "mitigé"
     assert result.weather.reasons[0] == (
         "Les précipitations prévues pénalisent fortement ce créneau pour le vélo."
     )
