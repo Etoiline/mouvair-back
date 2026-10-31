@@ -6,12 +6,12 @@ un stockage mémoire partagé pour vérifier les échanges entre deux instances.
 """
 
 import asyncio
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from forecast_fixtures import MutableClock, SequencedFetcher
 from mouvair_api.config import Settings
 from mouvair_api.errors import DataUnavailableError
 from mouvair_api.forecast_cache import RedisForecastCache
@@ -26,33 +26,6 @@ from mouvair_api.models import (
 )
 from mouvair_api.redis_store import RedisStore
 from mouvair_api.scoring import calculate_score
-
-
-@dataclass
-class MutableClock:
-    """Horloge injectée que chaque scénario avance jusqu’à une frontière précise."""
-    value: datetime
-
-    def __call__(self) -> datetime:
-        """Expose l’instant courant au service avec la même interface que l’horloge réelle."""
-        return self.value
-
-
-class SequencedFetcher:
-    """Fournisseur déterministe renvoyant successivement des prévisions ou des erreurs."""
-
-    def __init__(self, *outcomes: ForecastResponse | DataUnavailableError) -> None:
-        """Conserve les issues et compte les vrais rafraîchissements demandés."""
-        self.outcomes = outcomes
-        self.calls = 0
-
-    async def __call__(self, latitude: float, longitude: float) -> ForecastResponse:
-        """Consomme une issue par appel pour révéler un rafraîchissement superflu."""
-        outcome = self.outcomes[self.calls]
-        self.calls += 1
-        if isinstance(outcome, DataUnavailableError):
-            raise outcome
-        return outcome
 
 
 def forecast_at(
@@ -345,3 +318,63 @@ def test_two_instances_share_a_forecast_through_the_distributed_cache(
     assert cached.from_cache is True
     assert cached.generated_at == direct.generated_at
     assert (cached.latitude, cached.longitude) == (provider_latitude, provider_longitude)
+
+
+@pytest.mark.parametrize(
+    ("age", "state", "recommendation_available"),
+    [(timedelta(minutes=16), "refresh_failed", True), (timedelta(minutes=61), "stale", False)],
+)
+def test_shared_refresh_timeout_preserves_the_previous_forecast(
+    memory_redis_store: RedisStore,
+    age: timedelta,
+    state: str,
+    recommendation_available: bool,
+) -> None:
+    """À l’expiration de l’attente, le repli conserve l’âge et les créneaux connus."""
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    previous = forecast_at(retrieved_at)
+    cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, clock=MutableClock(retrieved_at + age), shared_cache=cache)
+
+    async def scenario() -> ForecastResponse:
+        await cache.set(45.75, 4.85, previous)
+        token = await cache.acquire_lock(45.75, 4.85)
+        assert token is not None
+        try:
+            async with asyncio.timeout(1):
+                return await service.get_forecast(45.75, 4.85)
+        finally:
+            await cache.release_lock(45.75, 4.85, token)
+
+    fallback = asyncio.run(scenario())
+
+    assert fetcher.calls == 0
+    assert fallback.from_cache is True
+    assert fallback.data_state == state
+    assert fallback.recommendation_available is recommendation_available
+    assert fallback.generated_at == previous.generated_at
+    assert len(fallback.hours) == SLOT_COUNT
+
+
+def test_shared_refresh_timeout_without_previous_forecast_does_not_duplicate_the_fetch(
+    memory_redis_store: RedisStore,
+) -> None:
+    """Sans historique ni résultat partagé, la requête échoue sans doubler l’appel en cours."""
+    cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, shared_cache=cache)
+
+    async def scenario() -> None:
+        token = await cache.acquire_lock(45.75, 4.85)
+        assert token is not None
+        try:
+            async with asyncio.timeout(1):
+                with pytest.raises(DataUnavailableError, match="déjà en cours"):
+                    await service.get_forecast(45.75, 4.85)
+        finally:
+            await cache.release_lock(45.75, 4.85, token)
+
+    asyncio.run(scenario())
+
+    assert fetcher.calls == 0

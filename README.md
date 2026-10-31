@@ -66,6 +66,7 @@ restent informatifs et ne participent à aucune note.
 - `compose.yaml` démarre l’API et Redis local avec son volume persistant ; le `Dockerfile`
   construit le serveur API, exécuté avec un utilisateur dédié.
 - `.gitignore` et `.dockerignore` expliquent les fichiers locaux ou générés à exclure.
+- `.github/workflows/checks.yml` exécute Ruff et les tests avec Redis sur GitHub Actions.
 - `scripts/release.py` vérifie la cohérence des versions et du changelog avant de préparer les
   fichiers puis de créer le commit de release local. `--dry-run` conserve le choix interactif.
 - `CHANGELOG.md` conserve l’historique des versions ; `AGENTS.md` décrit les conventions du dépôt.
@@ -80,20 +81,24 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_open_meteo.py` | Paramètres HTTP et passage des réponses météo et air à l’assemblage. |
 | `test_forecast_slots.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
 | `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
-| `test_forecast_cache.py` | Identité demandée, métadonnées fournisseur et isolation des clés v1/v2. |
+| `test_forecast_cache.py` | Identité demandée, clés v1/v2, entrées corrompues et attente bornée. |
 | `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
 | `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota et propagation de Retry-After. |
 | `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
 | `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
 | `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
 | `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
-| `test_redis_integration.py` | Scripts atomiques, verrous, attente et cache L2 sur un vrai Redis. |
+| `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
+| `test_redis_integration.py` | Atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
 
 `conftest.py` fournit un stockage mémoire indexé par clé pour exercer le véritable
 `RedisForecastCache` dans les tests unitaires. Le partage entre deux services est vérifié avec
 des coordonnées fournisseur identiques ou différentes de celles de la demande.
 `forecast_payloads.py` fournit les séries simulées communes aux tests d’assemblage et d’adaptation
-HTTP. Ces suites vérifient séparément le calcul pur et la frontière réseau sans appel externe.
+HTTP. `forecast_fixtures.py` partage l’horloge contrôlée et le fournisseur séquencé entre les
+scénarios HTTP et de service. Les tests HTTP conservent le middleware, la sérialisation FastAPI,
+le vrai service de prévision et l’adaptateur de cache ; les données fournisseur sont simulées.
+Les tests ne consomment donc aucun quota Open-Meteo.
 
 ## Créneaux et données utilisées
 
@@ -121,6 +126,12 @@ les 24 créneaux demandés. Chaque processus garde un cache mémoire L1 de 256 p
 de cache L2 partagé entre les workers et les instances. Une réponse mise en cache garde son heure
 réelle de récupération dans `generated_at`. Un verrou Redis empêche plusieurs instances de
 rafraîchir simultanément la même position.
+
+Lorsqu’une autre instance rafraîchit déjà la position, l’attente ignore la génération connue,
+identifiée par son `generated_at`. L’ancienne entrée peut rester présente dans Redis pendant le
+chargement : elle ne doit pas être confondue avec le nouveau résultat. Si aucune nouvelle
+génération n’arrive avant le délai configuré, le service utilise son repli habituel ou signale
+l’indisponibilité lorsqu’il ne possède aucun historique.
 
 Les coordonnées exactes de la demande, sans arrondi supplémentaire, identifient le cache mémoire,
 les entrées Redis et leurs verrous. Elles sont transmises explicitement à l’écriture du L2.
@@ -267,9 +278,30 @@ docker compose stop redis
 ```
 
 La commande `ping` doit répondre `PONG`. Les tests marqués `redis_integration` utilisent la base 15,
-nettoient leurs clés et vérifient les réservations concurrentes, les verrous, le délai partagé et
-`/health`. `docker compose stop redis` arrête le service sans supprimer le volume persistant, tandis
-que `docker compose down -v` supprimerait aussi les données Redis locales.
+nettoient uniquement leurs propres clés et vérifient les réservations concurrentes, les verrous,
+le délai partagé, `/health`, l’expiration réelle du cache, son rétablissement après corruption et
+le partage d’un rafraîchissement entre deux connexions. Ils couvrent aussi le cas où une ancienne
+prévision reste présente pendant le chargement de la suivante.
+
+Sans `TEST_REDIS_URL`, ces tests d’intégration sont ignorés ; les autres tests restent exécutables
+sans Redis. Lorsque la variable est définie, une connexion Redis impossible fait échouer les
+tests concernés. `docker compose stop redis` arrête le service sans supprimer le volume persistant,
+tandis que `docker compose down -v` supprimerait aussi les données Redis locales.
+
+### Vérifications automatiques sur GitHub
+
+Le workflow `.github/workflows/checks.yml` démarre à chaque push et pull request ; il peut aussi
+être déclenché manuellement depuis l’onglet Actions. Il utilise Python 3.12 comme le `Dockerfile`,
+installe le package avec son extra `dev`, puis lance Ruff et toute la suite Pytest.
+
+Un conteneur Redis 8.2 dédié au job est attendu jusqu’à son état sain. `TEST_REDIS_URL` pointe
+explicitement vers sa base 15 pour activer les tests Redis en CI. Ce service est éphémère et
+n’utilise ni le Redis de développement ni celui de production. La configuration suit le
+[fonctionnement des services Redis dans GitHub Actions](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-redis-service-containers).
+
+Les actions sont épinglées à leurs SHA de release. Le workflow possède uniquement le droit de
+lecture du dépôt ; il ne déploie pas l’application. Sa première exécution sur GitHub aura lieu
+après publication de la branche contenant ce fichier.
 
 ## Déploiement sur Railway
 

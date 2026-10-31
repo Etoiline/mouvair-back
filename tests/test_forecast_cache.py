@@ -106,3 +106,47 @@ def test_v2_preserves_and_ignores_legacy_cache_entries_and_locks(
         await memory_redis_store.release_lock(legacy_lock_key, legacy_token)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw_value", ["{invalid-json", "{}", '["invalid-model"]'])
+def test_corrupt_forecast_is_deleted_without_removing_another_position(
+    memory_redis_store: RedisStore,
+    provider_forecast: ForecastResponse,
+    raw_value: str,
+) -> None:
+    """Un JSON illisible ou incompatible devient un cache absent, sans toucher aux voisins."""
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    corrupt_key = cache._cache_key(45.75, 4.85)
+
+    async def scenario() -> None:
+        await memory_redis_store.set(corrupt_key, raw_value, 60)
+        await cache.set(45.76, 4.86, provider_forecast)
+
+        assert await cache.get(45.75, 4.85) is None
+        assert await memory_redis_store.get(corrupt_key) is None
+        assert await cache.get(45.76, 4.86) == provider_forecast
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("with_previous_forecast", [False, True])
+def test_wait_returns_none_when_no_new_generation_arrives_before_the_deadline(
+    memory_redis_store: RedisStore,
+    provider_forecast: ForecastResponse,
+    with_previous_forecast: bool,
+) -> None:
+    """L’attente reste bornée si le cache est vide ou si sa seule entrée est déjà connue."""
+    cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+
+    async def scenario() -> None:
+        if with_previous_forecast:
+            await cache.set(45.75, 4.85, provider_forecast)
+        async with asyncio.timeout(1):
+            assert await cache.wait(
+                45.75, 4.85, previous_generated_at=provider_forecast.generated_at,
+            ) is None
+        if with_previous_forecast:
+            # L’ancienne génération reste conservée pour le repli du service.
+            assert await cache.get(45.75, 4.85) == provider_forecast
+
+    asyncio.run(scenario())
