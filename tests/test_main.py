@@ -69,7 +69,7 @@ def test_location_search_returns_a_quota_503_with_retry_after() -> None:
     assert response.json() == {"detail": "limite"}
 
 
-def test_location_client_limit_returns_429_and_keeps_clients_separate() -> None:
+def test_location_client_limit_returns_429_when_the_same_client_changes_city() -> None:
     """Changer la ville recherchée ne réinitialise pas le budget du même client réseau."""
     settings = Settings(
         redis_failure_mode="local",

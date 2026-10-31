@@ -40,7 +40,13 @@ class SharedForecastCache(Protocol):
 
     async def release_lock(self, latitude: float, longitude: float, token: str) -> None: ...
 
-    async def wait(self, latitude: float, longitude: float) -> ForecastResponse | None: ...
+    async def wait(
+        self,
+        latitude: float,
+        longitude: float,
+        *,
+        previous_generated_at: str | None = None,
+    ) -> ForecastResponse | None: ...
 
 
 class RedisForecastCache:
@@ -90,17 +96,25 @@ class RedisForecastCache:
         """Restitue la possession avec le jeton attribué lors de l’acquisition."""
         await self._store.release_lock(self._lock_key(latitude, longitude), token)
 
-    async def wait(self, latitude: float, longitude: float) -> ForecastResponse | None:
-        """Attend brièvement une entrée partagée sans bloquer la boucle asynchrone.
+    async def wait(
+        self,
+        latitude: float,
+        longitude: float,
+        *,
+        previous_generated_at: str | None = None,
+    ) -> ForecastResponse | None:
+        """Attend une nouvelle génération sans bloquer la boucle asynchrone.
 
         L’appelant doit encore vérifier la fraîcheur du résultat obtenu. La borne
         d’attente évite de retenir indéfiniment une requête derrière une autre instance.
+        Une entrée déjà connue peut rester dans Redis pendant le rafraîchissement :
+        sa simple présence ne signifie pas que l’autre instance a terminé son travail.
         """
         deadline = monotonic() + self._lock_wait
         while monotonic() < deadline:
             await asyncio.sleep(0.05)
             forecast = await self.get(latitude, longitude)
-            if forecast is not None:
+            if forecast is not None and forecast.generated_at != previous_generated_at:
                 return forecast
         return None
 

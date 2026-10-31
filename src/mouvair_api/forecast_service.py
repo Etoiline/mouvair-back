@@ -313,7 +313,11 @@ class ForecastService:
         if token is None:
             # Une autre instance possède le verrou ; attendre son résultat évite un doublon.
             try:
-                shared = await self._shared_cache.wait(latitude, longitude)
+                shared = await self._shared_cache.wait(
+                    latitude,
+                    longitude,
+                    previous_generated_at=previous.forecast.generated_at if previous else None,
+                )
             except RedisUnavailable:
                 shared = None
             if shared is None:
