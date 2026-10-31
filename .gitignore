@@ -1,4 +1,4 @@
-# Environnement Python installé localement, reproductible depuis pyproject.toml.
+# Environnement Python installé localement, reproductible depuis uv.lock.
 .venv/
 # Fichiers générés par Python et par l’installation du package.
 __pycache__/

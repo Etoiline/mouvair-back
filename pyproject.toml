@@ -1,4 +1,4 @@
-# Métadonnées du package installé par pip. Le script de release synchronise cette
+# Métadonnées du package Python. Le script de release synchronise cette
 # version avec mouvair_api.__version__, utilisée par les métadonnées HTTP de l’API.
 [project]
 name = "mouvair-back"
@@ -17,26 +17,30 @@ dependencies = [
     "uvicorn[standard]==0.52.4",
 ]
 
-# pip install -e ".[dev]" ajoute les tests et le contrôle statique au package éditable.
+# uv sync --locked --extra dev ajoute les outils du même verrou au package éditable.
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.4,<10",
-    "ruff>=0.16,<0.18",
+    "pytest==9.1.1",
+    "ruff==0.16.6",
 ]
 
-# Setuptools construit le package ; aucune étape frontend n’est nécessaire au backend.
+# Le constructeur est lui aussi épinglé, y compris dans l’environnement de build isolé.
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
+
+# Le poste local, Docker et la CI utilisent le même format et le même moteur de verrouillage.
+[tool.uv]
+required-version = "==0.13.6"
 
 # Le layout src évite de confondre les sources Python avec les fichiers à la racine.
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Pytest importe directement les sources et limite la découverte au dossier tests.
+# Pytest importe les sources et le script de release ; la découverte reste limitée aux tests.
 # Les tests Redis restent ignorés tant que TEST_REDIS_URL n’est pas configurée.
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 markers = [
     "redis_integration: nécessite une instance Redis réelle configurée par TEST_REDIS_URL",

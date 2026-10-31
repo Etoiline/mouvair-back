@@ -2,7 +2,7 @@
 
 Le script vérifie d’abord un dépôt propre, les versions synchronisées et la
 présence de changements non publiés. Il demande un niveau SemVer, prépare les
-trois fichiers puis crée un commit local. --dry-run conserve ces validations mais
+fichiers et actualise uv.lock hors ligne avant le commit. --dry-run conserve ces validations mais
 s’arrête avant toute écriture. Le script ne pousse pas et ne crée pas de tag Git.
 """
 
@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PROJECT_ROOT / "pyproject.toml"
 PACKAGE_INIT_PATH = PROJECT_ROOT / "src" / "mouvair_api" / "__init__.py"
 CHANGELOG_PATH = PROJECT_ROOT / "CHANGELOG.md"
+LOCKFILE_PATH = PROJECT_ROOT / "uv.lock"
 PROJECT_VERSION_PATTERN = re.compile(r'(?m)^version = "(?P<version>[^"]+)"\s*$')
 PACKAGE_VERSION_PATTERN = re.compile(r'(?m)^__version__ = "(?P<version>[^"]+)"\s*$')
 RELEASE_HEADING_PATTERN = re.compile(
@@ -120,6 +121,50 @@ def ensure_clean_repository() -> None:
             "Le dépôt doit être propre avant une release. Committez ou annulez ces changements :\n"
             f"{status}"
         )
+
+
+def run_uv(*arguments: str) -> None:
+    """Vérifie ou actualise le verrou avec la version de uv exigée par le projet."""
+
+    try:
+        result = subprocess.run(
+            ["uv", *arguments],
+            cwd=PROJECT_ROOT,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise ReleaseError(
+            "uv est introuvable. Installez la version indiquée dans le README."
+        ) from error
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ReleaseError(f"La commande uv a échoué : uv {' '.join(arguments)}\n{detail}")
+
+
+def write_release_files(contents: dict[Path, str]) -> None:
+    """Synchronise les fichiers et le verrou, avec restauration si la préparation échoue.
+
+    uv conserve les versions déjà résolues et modifie les métadonnées du package
+    local sans accès réseau. Aucun fichier n’est stagé avant cette étape réussie.
+    """
+
+    originals = {path: path.read_bytes() for path in (*contents, LOCKFILE_PATH)}
+    try:
+        for path, content in contents.items():
+            write_text(path, content)
+        run_uv("lock", "--offline")
+    except (ReleaseError, OSError) as error:
+        for path, original in originals.items():
+            path.write_bytes(original)
+        raise ReleaseError(
+            "La préparation de la release a échoué ; les fichiers ont été restaurés.\n"
+            f"{error}"
+        ) from error
 
 
 def read_project_version(pyproject: str, package_init: str) -> Version:
@@ -226,8 +271,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Valide, prépare en mémoire, puis écrit et committe la prochaine release.
 
-    Les trois contenus sont calculés avant la branche dry-run. Le commit ne
-    stage que les fichiers de version et le changelog ; un dernier contrôle
+    Les contenus sont calculés avant la branche dry-run. Le commit ne
+    stage que les fichiers de version, le changelog et le verrou ; un dernier contrôle
     signale tout changement restant après l’opération.
     """
 
@@ -236,6 +281,8 @@ def main() -> None:
 
     arguments = build_parser().parse_args()
     ensure_clean_repository()
+    # Un verrou absent ou périmé doit être corrigé avant de commencer une release.
+    run_uv("lock", "--check", "--offline")
 
     pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")
     package_init = PACKAGE_INIT_PATH.read_text(encoding="utf-8")
@@ -266,15 +313,18 @@ def main() -> None:
         return
 
     # La première écriture intervient seulement après tous les contrôles et le choix SemVer.
-    write_text(PYPROJECT_PATH, next_pyproject)
-    write_text(PACKAGE_INIT_PATH, next_package_init)
-    write_text(CHANGELOG_PATH, next_changelog)
+    write_release_files({
+        PYPROJECT_PATH: next_pyproject,
+        PACKAGE_INIT_PATH: next_package_init,
+        CHANGELOG_PATH: next_changelog,
+    })
     run_git(
         "add",
         "--",
         PYPROJECT_PATH.name,
         PACKAGE_INIT_PATH.relative_to(PROJECT_ROOT).as_posix(),
         CHANGELOG_PATH.name,
+        LOCKFILE_PATH.name,
     )
     run_git("commit", "-m", f"🔖 Release {next_version}")
 

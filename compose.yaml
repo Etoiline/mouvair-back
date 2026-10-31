@@ -38,7 +38,8 @@ services:
       retries: 3
       start_period: 10s
   redis:
-    image: redis:8.2-alpine
+    # Même image Redis 8.2.9 que la CI, figée sans dépendre des mises à jour du tag.
+    image: redis:8.2-alpine@sha256:30abb90e62f14b737010746def3ba99cc79fe19dcdb3d37b41f21fc62e7da19d
     # AOF conserve les écritures ; everysec synchronise le journal chaque seconde.
     # noeviction évite de supprimer silencieusement des compteurs de quota sous pression mémoire.
     command:
