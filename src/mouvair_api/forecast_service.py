@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .errors import DataUnavailableError
 from .forecast_cache import SharedForecastCache
+from .forecast_slots import SLOT_COUNT, SPORTS, next_full_hour
 from .models import (
     Conditions,
     ForecastDataState,
@@ -23,7 +25,6 @@ from .models import (
     PollenForecast,
     SlotConditions,
 )
-from .open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour
 from .redis_store import RedisUnavailable
 from .scoring import calculate_score
 
@@ -79,7 +80,7 @@ def _hour_timestamp(hour: HourlyForecast) -> int | None:
 
 def _requested_timestamps(now: datetime, timezone: ZoneInfo) -> list[int]:
     """Détermine les 24 départs futurs à partir de l’heure pleine locale suivante."""
-    first_start = _next_full_hour(now, timezone)
+    first_start = next_full_hour(now, timezone)
     return [
         int((first_start + timedelta(hours=offset)).timestamp())
         for offset in range(SLOT_COUNT)
@@ -137,7 +138,7 @@ def _windowed_response(
         for hour in forecast.hours
         if (timestamp := _hour_timestamp(hour)) is not None
     }
-    first_start = _next_full_hour(now, timezone)
+    first_start = next_full_hour(now, timezone)
     hours = []
     for offset in range(SLOT_COUNT):
         start = first_start + timedelta(hours=offset)
@@ -273,7 +274,7 @@ class ForecastService:
         """
         try:
             forecast = await self._fetcher(latitude, longitude)
-        except OpenMeteoError:
+        except DataUnavailableError:
             if previous is None:
                 raise
             return self._fallback(previous, self._now())
@@ -318,7 +319,7 @@ class ForecastService:
             if shared is None:
                 if previous is not None:
                     return self._fallback(previous, self._now())
-                raise OpenMeteoError(
+                raise DataUnavailableError(
                     "Une récupération identique est déjà en cours, veuillez réessayer"
                 )
             now = self._now()

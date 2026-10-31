@@ -25,7 +25,9 @@ notamment les plafonds, les bornes temporelles et la coordination entre requête
 | `main.py` | Construction de FastAPI, cycle de vie des connexions, CORS, routes et erreurs HTTP. |
 | `config.py` | Configuration immuable, lecture de l’environnement et validation des limites. |
 | `models.py` | Contrat Pydantic des villes, mesures, pollens, scores et prévisions. |
-| `open_meteo.py` | Appels fournisseur, nettoyage des séries, jointure temporelle et créneaux. |
+| `open_meteo.py` | Appels HTTP fournisseur, géocodage, paramètres, erreurs réseau et quota. |
+| `forecast_slots.py` | Assemblage pur des séries, mesures, pollens, créneaux et horaires locaux. |
+| `errors.py` | Erreur de disponibilité commune aux services et aux adaptateurs de données. |
 | `scoring.py` | Profils sportifs, courbes, notes précises, plafonds, arrondis et explications. |
 | `forecast_service.py` | Cache mémoire L1, fraîcheur, fenêtre de 24 départs et réponse de secours. |
 | `forecast_cache.py` | Sérialisation des prévisions dans le L2 Redis et verrou distribué. |
@@ -35,8 +37,18 @@ notamment les plafonds, les bornes temporelles et la coordination entre requête
 | `redis_store.py` | Connexions, commandes, verrous à jeton et délai de repli après une panne Redis. |
 
 Pour suivre une requête de prévision, commencer par `main.py`, puis `ForecastService.get_forecast`,
-`OpenMeteoGateway.get_forecast`, l’assemblage des créneaux dans `open_meteo.py` et enfin le moteur
+`OpenMeteoGateway.get_forecast`, l’assemblage des créneaux dans `forecast_slots.py` et enfin le moteur
 `scoring.py`. `models.py` décrit les objets échangés tout au long de ce parcours.
+
+`forecast_slots.py` ne réalise aucun accès HTTP ou Redis. Son interface publique expose
+`assemble_forecast` pour construire la réponse à partir des séries déjà récupérées et
+`next_full_hour` pour calculer les départs locaux. Le service de prévision utilise directement
+cette règle horaire commune, sans importer de fonction privée du transport Open-Meteo.
+
+Les erreurs attendues dérivent de `DataUnavailableError`, défini dans `errors.py`. L’adaptateur
+conserve ses exceptions spécialisées pour les erreurs HTTP et les quotas. Les services déclenchent
+leur repli sur le contrat commun ; les routes distinguent toujours les limitations `503` des
+autres indisponibilités `502`.
 
 Les ressources réseau sont créées au démarrage dans le gestionnaire `lifespan` et partagées par
 les routes via `app.state`. Les services acceptent des dépendances injectées, par exemple une
@@ -65,7 +77,8 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | Suite | Vérifications principales |
 |---|---|
 | `test_scoring.py` | Courbes, frontières des catégories, arrondis, plafonds et données incomplètes. |
-| `test_open_meteo.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
+| `test_open_meteo.py` | Paramètres HTTP et passage des réponses météo et air à l’assemblage. |
+| `test_forecast_slots.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
 | `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
 | `test_forecast_cache.py` | Identité demandée, métadonnées fournisseur et isolation des clés v1/v2. |
 | `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
@@ -79,6 +92,8 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 `conftest.py` fournit un stockage mémoire indexé par clé pour exercer le véritable
 `RedisForecastCache` dans les tests unitaires. Le partage entre deux services est vérifié avec
 des coordonnées fournisseur identiques ou différentes de celles de la demande.
+`forecast_payloads.py` fournit les séries simulées communes aux tests d’assemblage et d’adaptation
+HTTP. Ces suites vérifient séparément le calcul pur et la frontière réseau sans appel externe.
 
 ## Créneaux et données utilisées
 

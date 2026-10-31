@@ -1,5 +1,7 @@
 # Changelog
 
+- Separate forecast assembly and time rules from Open-Meteo transport, introduce shared data errors, and reorganize tests by responsibility.
+
 - Fix shared forecast cache identity to use requested coordinates, preserve provider metadata, and isolate legacy entries and locks in a v2 namespace, with regression and Redis integration coverage.
 
 - Add detailed French comments across backend modules, tests, release tooling and configuration, and document the project structure and request flow in the README.
