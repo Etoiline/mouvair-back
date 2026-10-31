@@ -23,4 +23,5 @@ USER mouvair
 EXPOSE 8000
 
 # Le shell développe PORT, puis exec transmet les signaux d’arrêt directement à Uvicorn.
-CMD ["sh", "-c", "exec uvicorn mouvair_api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Les événements HTTP JSON remplacent le journal d’accès brut qui recopierait les paramètres.
+CMD ["sh", "-c", "exec uvicorn mouvair_api.main:app --host 0.0.0.0 --port ${PORT:-8000} --no-access-log"]

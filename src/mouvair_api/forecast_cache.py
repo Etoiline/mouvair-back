@@ -11,6 +11,7 @@ l’âge des données ; les mesures manquantes restent des valeurs partielles va
 
 import asyncio
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Protocol
@@ -19,6 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import ValidationError
 
 from .config import Settings
+from .diagnostics import error_fields, log_event
 from .models import ForecastResponse
 from .redis_store import RedisStore
 
@@ -99,7 +101,11 @@ class RedisForecastCache:
             forecast = ForecastResponse.model_validate_json(raw_value)
             _validate_cached_forecast(forecast)
             return forecast
-        except (ValidationError, ValueError, ZoneInfoNotFoundError, OverflowError):
+        except (ValidationError, ValueError, ZoneInfoNotFoundError, OverflowError) as exc:
+            log_event(
+                "forecast.cache_invalid", level=logging.WARNING,
+                source="redis", **error_fields(exc),
+            )
             await self._store.delete(key)
             return None
 

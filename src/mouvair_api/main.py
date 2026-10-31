@@ -5,6 +5,7 @@ traduction des erreurs métier en réponses HTTP. Les règles de score, de cache
 et de quota restent dans leurs modules respectifs pour être testées séparément.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .client_identity import client_identity
 from .config import Settings
+from .diagnostics import RequestDiagnosticsMiddleware, configure_logging, log_event
 from .errors import DataUnavailableError
 from .forecast_cache import RedisForecastCache
 from .forecast_service import ForecastService
@@ -38,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         """Ouvre les ressources partagées du processus et les ferme à son arrêt."""
+        configure_logging()
         store = RedisStore(resolved_settings)
         await store.connect()
         # Le pool HTTP est réutilisé par les recherches et les deux API de prévision.
@@ -94,6 +97,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await request.app.state.client_limiter.check(endpoint, identity)
             except RateLimitExceeded as exc:
+                log_event(
+                    "http.client_limited", level=logging.WARNING,
+                    endpoint=endpoint, retry_after=exc.retry_after,
+                )
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Trop de requêtes, veuillez réessayer plus tard"},
@@ -112,6 +119,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Le navigateur peut lire le délai de reprise sur les réponses 429 et 503.
         expose_headers=["Retry-After"],
     )
+    # À l’extérieur de CORS et du limiteur pour observer leurs réponses anticipées aussi.
+    application.add_middleware(RequestDiagnosticsMiddleware)
 
     @application.get("/health")
     async def health(request: Request) -> dict[str, str]:

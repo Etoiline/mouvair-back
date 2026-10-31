@@ -8,15 +8,17 @@ regroupent les recherches identiques. Le quota reste géré par le fetcher injec
 import asyncio
 import hashlib
 import json
+import logging
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Protocol
 
 from .config import Settings
+from .diagnostics import error_fields, log_event
 from .errors import DataUnavailableError
 from .models import Location
 from .redis_store import RedisUnavailable
@@ -93,11 +95,13 @@ class GeocodingService:
         key = (normalized.casefold(), count)
         cached = self._local(key)
         if cached is not None:
+            log_event("geocoding.cache_hit", source="memory", result_count=len(cached))
             return cached
 
         shared = await self._shared(key)
         if shared is not None:
             self._store_local(key, shared)
+            log_event("geocoding.cache_hit", source="redis", result_count=len(shared))
             return shared
 
         task = self._inflight.get(key)
@@ -105,6 +109,8 @@ class GeocodingService:
             task = asyncio.create_task(self._load(key, normalized, count))
             self._inflight[key] = task
             task.add_done_callback(lambda finished: self._clear_inflight(key, finished))
+        else:
+            log_event("geocoding.coalesced", source="memory")
         # Un demandeur annulé ne doit pas interrompre la recherche partagée par les autres.
         return await asyncio.shield(task)
 
@@ -137,12 +143,20 @@ class GeocodingService:
             return await self._fetch_and_cache(key, query, count)
 
         if token is None:
+            started = perf_counter()
             shared = await self._wait_for_shared(key)
+            log_event(
+                "geocoding.shared_wait", source="redis",
+                level=logging.INFO if shared is not None else logging.WARNING,
+                outcome="ready" if shared is not None else "timeout",
+                duration_ms=round((perf_counter() - started) * 1_000, 3),
+            )
             if shared is None:
                 raise DataUnavailableError(
                     "Une recherche identique est déjà en cours, veuillez réessayer"
                 )
             self._store_local(key, shared)
+            log_event("geocoding.cache_hit", source="redis", result_count=len(shared))
             return shared
 
         try:
@@ -150,6 +164,7 @@ class GeocodingService:
             shared = await self._shared(key)
             if shared is not None:
                 self._store_local(key, shared)
+                log_event("geocoding.cache_hit", source="redis", result_count=len(shared))
                 return shared
             return await self._fetch_and_cache(key, query, count)
         finally:
@@ -164,7 +179,16 @@ class GeocodingService:
         L’écriture Redis est facultative pour servir un résultat déjà obtenu ; la
         copie retournée empêche l’appelant d’altérer les objets gardés en mémoire.
         """
-        locations = await self._fetcher(query, count)
+        started = perf_counter()
+        try:
+            locations = await self._fetcher(query, count)
+        except DataUnavailableError as exc:
+            log_event(
+                "geocoding.fetch_failed", level=logging.WARNING, source="provider",
+                duration_ms=round((perf_counter() - started) * 1_000, 3), **error_fields(exc),
+            )
+            raise
+        provider_duration_ms = round((perf_counter() - started) * 1_000, 3)
         self._store_local(key, locations)
         ttl = self._positive_ttl if locations else self._negative_ttl
         with suppress(RedisUnavailable):
@@ -173,6 +197,10 @@ class GeocodingService:
                 json.dumps([location.model_dump(mode="json") for location in locations]),
                 ttl,
             )
+        log_event(
+            "geocoding.fetched", source="provider", result_count=len(locations),
+            duration_ms=provider_duration_ms,
+        )
         return [location.model_copy(deep=True) for location in locations]
 
     async def _shared(self, key: CacheKey) -> list[Location] | None:
@@ -189,7 +217,11 @@ class GeocodingService:
             if not isinstance(payload, list):
                 raise ValueError("Le cache de géocodage doit contenir une liste")
             return [Location.model_validate(item) for item in payload]
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            log_event(
+                "geocoding.cache_invalid", level=logging.WARNING,
+                source="redis", **error_fields(exc),
+            )
             with suppress(RedisUnavailable):
                 await self._store.delete(shared_key)
             return None

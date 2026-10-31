@@ -15,8 +15,8 @@ import redis.asyncio as redis
 from redis.exceptions import RedisError
 
 from .config import Settings
+from .diagnostics import error_fields, log_event
 
-logger = logging.getLogger(__name__)
 Result = TypeVar("Result")
 
 # La comparaison du jeton et la suppression doivent être indivisibles : un ancien
@@ -171,12 +171,12 @@ class RedisStore:
             self._retry_at = monotonic() + self._settings.redis_retry_delay_seconds
             # Le journal signale les transitions, sans répéter le même avertissement par GET.
             if not self._reported_unavailable:
-                logger.warning("Redis est indisponible : %s", exc)
+                log_event("redis.unavailable", level=logging.WARNING, **error_fields(exc))
                 self._reported_unavailable = True
             raise RedisUnavailable("Redis est temporairement indisponible") from exc
 
         if self._reported_unavailable:
-            logger.info("La connexion Redis est rétablie")
+            log_event("redis.restored")
         self._reported_unavailable = False
         self._available = True
         self._retry_at = 0.0
