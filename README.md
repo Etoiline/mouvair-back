@@ -62,6 +62,10 @@ restent informatifs et ne participent à aucune note.
 ### Fichiers de configuration et maintenance
 
 - `pyproject.toml` décrit le package, ses dépendances, la découverte des sources, Pytest et Ruff.
+- `uv.lock` fixe les dépendances directes et indirectes, les outils de développement et les
+  empreintes des archives pour Windows et Linux. Il est généré par uv et versionné avec le projet.
+- `.python-version` fixe Python 3.12.16 pour le développement et la CI ; le `Dockerfile`
+  utilise cette même version et des images identifiées par leur empreinte.
 - `.env.example` explique chaque groupe de variables ; `.env` contient la configuration locale
   chargée par l’option `--env-file` d’Uvicorn et reste exclu de Git et de l’image Docker.
 - `compose.yaml` démarre l’API et Redis local avec son volume persistant ; le `Dockerfile`
@@ -88,6 +92,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
 | `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
 | `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
+| `test_release.py` | Mise à jour hors ligne du verrou et restauration des fichiers si elle échoue. |
 | `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
 | `test_diagnostics.py` | Journaux JSON, durées, sources, replis et contexte concurrent des requêtes. |
 | `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
@@ -286,6 +291,8 @@ Compose construit l’image de l’API, attend que Redis soit disponible, puis v
 répond avec un état `ok` et une connexion Redis `ok`. Les deux services doivent apparaître
 avec l’état `healthy` dans Docker. L’API est accessible sur `http://localhost:8000`, sa
 documentation sur `http://localhost:8000/docs` et son diagnostic sur `http://localhost:8000/health`.
+Les images Python, uv et Redis sont figées par empreinte ; Compose et la CI partagent la même
+image Redis 8.2.9. Leurs mises à jour passent par une modification explicite de ces références.
 
 Le fichier `.env` est facultatif dans ce mode. S’il existe, ses valeurs sont transmises au
 conteneur ; Compose fixe le port interne à `8000`, l’adresse Redis à `redis://redis:6379/0`
@@ -313,17 +320,59 @@ Pour arrêter l’environnement en conservant les données Redis :
 docker compose stop
 ```
 
+### Installation reproductible sur le poste hôte
+
+Installer une fois **uv 0.13.6**, avec un Python déjà disponible sur le poste :
+
+```powershell
+python -m pip install --user "uv==0.13.6"
+uv --version
+```
+
+La commande `uv` doit être accessible dans le `PATH` du terminal. Les autres méthodes
+d’installation figurent dans la [documentation officielle de uv](https://docs.astral.sh/uv/getting-started/installation/).
+Depuis la racine du backend, installer ensuite l’environnement de développement :
+
+```powershell
+uv sync --locked --extra dev
+```
+
+Cette commande crée ou synchronise `.venv`, installe Python 3.12.16 si nécessaire et sélectionne
+les versions exactes de `uv.lock`, avec leurs empreintes. Le verrou contient aussi les conditions
+propres à chaque plateforme : `uvloop`, par exemple, est installé sur Linux et pas sur Windows.
+Les dépendances applicables aux deux systèmes conservent les mêmes versions.
+
+`--locked` fait échouer l’installation si `pyproject.toml` et `uv.lock` ne correspondent plus,
+sans modifier le verrou. Répéter la commande conserve les versions résolues ; les paquets
+étrangers à cet environnement sont retirés. Docker utilise le même verrou, avec seulement les
+dépendances d’exécution, tandis que le poste de développement et la CI ajoutent l’extra `dev`.
+La version de uv et celle du constructeur Setuptools sont également épinglées dans le projet.
+
+Après une modification volontaire des dépendances dans `pyproject.toml` :
+
+```powershell
+uv lock
+uv sync --locked --extra dev
+uv run --locked --extra dev ruff check .
+uv run --locked --extra dev pytest
+```
+
+Versionner `pyproject.toml` et `uv.lock` ensemble après vérification. Pour actualiser une dépendance
+indirecte précise, utiliser par exemple `uv lock --upgrade-package starlette` ; `uv lock --upgrade`
+réévalue toutes les versions autorisées. Ne pas modifier `uv.lock` à la main. Les mises à jour de
+Python doivent rester alignées entre `.python-version` et l’image du `Dockerfile`, empreinte comprise.
+Une mise à jour de uv doit aligner `pyproject.toml`, le `Dockerfile`, la CI et cette procédure.
+
 ### Développement avec Uvicorn sur le poste hôte
 
 Ce mode facilite le rechargement automatique du code. Si l’API Docker est déjà lancée,
 arrêter son service avec `docker compose stop api` pour libérer le port `8000`.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+uv sync --locked --extra dev
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d redis
-.\.venv\Scripts\python.exe -m uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env --no-access-log
+uv run --locked --extra dev uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env --no-access-log
 ```
 
 Remplacer `CLIENT_ID_HMAC_SECRET` dans `.env` par une valeur aléatoire longue avant d’exposer
@@ -336,8 +385,8 @@ Tests complets avec une instance Redis locale :
 docker compose up -d redis
 docker compose exec -T redis redis-cli ping
 $env:TEST_REDIS_URL="redis://127.0.0.1:6379/15"
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m ruff check .
+uv run --locked --extra dev pytest
+uv run --locked --extra dev ruff check .
 Remove-Item Env:TEST_REDIS_URL
 docker compose stop redis
 ```
@@ -356,10 +405,12 @@ tandis que `docker compose down -v` supprimerait aussi les données Redis locale
 ### Vérifications automatiques sur GitHub
 
 Le workflow `.github/workflows/checks.yml` démarre à chaque push et pull request ; il peut aussi
-être déclenché manuellement depuis l’onglet Actions. Il utilise Python 3.12 comme le `Dockerfile`,
-installe le package avec son extra `dev`, puis lance Ruff et toute la suite Pytest.
+être déclenché manuellement depuis l’onglet Actions. Il lit Python dans `.python-version`, installe
+uv 0.13.6 puis synchronise le package et son extra `dev` avec `uv sync --locked --extra dev`.
+Un verrou absent ou périmé fait échouer le job avant Ruff et la suite Pytest. Le cache uv dépend
+du contenu de `uv.lock` et n’autorise pas la résolution silencieuse de nouvelles versions.
 
-Un conteneur Redis 8.2 dédié au job est attendu jusqu’à son état sain. `TEST_REDIS_URL` pointe
+Un conteneur Redis 8.2.9 dédié au job est attendu jusqu’à son état sain. `TEST_REDIS_URL` pointe
 explicitement vers sa base 15 pour activer les tests Redis en CI. Ce service est éphémère et
 n’utilise ni le Redis de développement ni celui de production. La configuration suit le
 [fonctionnement des services Redis dans GitHub Actions](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-redis-service-containers).
@@ -396,17 +447,19 @@ Les réseaux de confiance ci-dessus sont réservés au déploiement Railway, don
 
 Le dépôt doit être propre et `CHANGELOG.md` doit contenir au moins une ligne de changement non
 publiée sous son titre. Le script demande s’il faut incrémenter la version majeure, mineure ou
-corrective, synchronise `pyproject.toml`, la version exposée par l’API et le changelog, puis crée le
-commit `🔖 Release x.y.z` :
+corrective, synchronise `pyproject.toml`, la version exposée par l’API, `uv.lock` et le changelog,
+puis crée le commit `🔖 Release x.y.z`. Le verrou est vérifié avant toute écriture et actualisé
+hors ligne sans mettre à jour les dépendances. Si cette préparation échoue, les quatre fichiers
+retrouvent leur contenu d’origine avant tout staging :
 
 ```powershell
-python scripts/release.py
+uv run --locked --extra dev python scripts/release.py
 ```
 
 Pour prévisualiser la prochaine version sans modifier le dépôt ni créer de commit :
 
 ```powershell
-python scripts/release.py --dry-run
+uv run --locked --extra dev python scripts/release.py --dry-run
 ```
 
 ## Endpoints

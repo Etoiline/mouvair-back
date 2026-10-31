@@ -1,19 +1,26 @@
-# Image d’exécution du backend ; Redis est un service distinct, accessible par REDIS_URL.
-FROM python:3.12-slim
+# Les empreintes figent aussi les images si leurs tags sont republiés.
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
+
+# Même version Python que .python-version et la CI ; Redis reste un service distinct.
+FROM python:3.12.16-slim@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07
 
 # Évite les fichiers bytecode dans l’image et affiche les journaux sans mise en tampon.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:$PATH"
 
 # Les chemins de construction et d’exécution restent indépendants du poste hôte.
 WORKDIR /app
 
 # Le package et ses métadonnées suffisent ; tests, .env et environnement local sont exclus.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock .python-version README.md ./
 COPY src ./src
 
-# Installe seulement les dépendances d’exécution et crée un utilisateur sans privilèges root.
-RUN pip install --no-cache-dir . \
+# --locked refuse un verrou périmé ; aucun outil de test ni binaire uv ne reste dans l’image.
+# L’installation non éditable et son environnement isolé servent aussi à l’exécution.
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
+    uv sync --locked --no-dev --no-editable --no-cache \
     && useradd --create-home --uid 10001 mouvair
 
 # Le serveur utilise cet utilisateur même si la construction s’est faite comme root.
