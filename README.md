@@ -67,13 +67,18 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_scoring.py` | Courbes, frontières des catégories, arrondis, plafonds et données incomplètes. |
 | `test_open_meteo.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
 | `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
+| `test_forecast_cache.py` | Identité demandée, métadonnées fournisseur et isolation des clés v1/v2. |
 | `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
 | `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota et propagation de Retry-After. |
 | `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
 | `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
 | `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
 | `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
-| `test_redis_integration.py` | Scripts atomiques, verrous et attente partagée sur un vrai Redis. |
+| `test_redis_integration.py` | Scripts atomiques, verrous, attente et cache L2 sur un vrai Redis. |
+
+`conftest.py` fournit un stockage mémoire indexé par clé pour exercer le véritable
+`RedisForecastCache` dans les tests unitaires. Le partage entre deux services est vérifié avec
+des coordonnées fournisseur identiques ou différentes de celles de la demande.
 
 ## Créneaux et données utilisées
 
@@ -101,6 +106,15 @@ les 24 créneaux demandés. Chaque processus garde un cache mémoire L1 de 256 p
 de cache L2 partagé entre les workers et les instances. Une réponse mise en cache garde son heure
 réelle de récupération dans `generated_at`. Un verrou Redis empêche plusieurs instances de
 rafraîchir simultanément la même position.
+
+Les coordonnées exactes de la demande, sans arrondi supplémentaire, identifient le cache mémoire,
+les entrées Redis et leurs verrous. Elles sont transmises explicitement à l’écriture du L2.
+Les coordonnées renvoyées par le fournisseur restent dans le contenu de la réponse, même si elles
+diffèrent de la position demandée ; elles ne servent pas à construire la clé de stockage.
+
+Les clés de prévision et de verrou utilisent l’espace `v2`. Les anciennes entrées `v1`, dont la
+clé d’écriture dépendait des coordonnées fournisseur, restent isolées et expirent naturellement
+selon leur TTL. Les clés de géocodage et les compteurs de quota gardent leur espace existant.
 
 La recherche de ville ne contacte Open-Meteo qu’à partir de trois caractères normalisés. Les
 résultats de géocodage sont conservés 24 heures dans Redis et dans un petit cache mémoire local. Une

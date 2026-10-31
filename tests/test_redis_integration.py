@@ -14,7 +14,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mouvair_api.config import Settings
+from mouvair_api.forecast_cache import RedisForecastCache
 from mouvair_api.main import create_app
+from mouvair_api.models import ForecastResponse
 from mouvair_api.rate_limit import (
     OpenMeteoQuota,
     RateLimitExceeded,
@@ -122,6 +124,47 @@ def test_real_redis_shares_a_provider_cooldown_between_instances() -> None:
         finally:
             await first_store.delete(cooldown_key)
             await first_store.delete(events_key)
+            await first_store.close()
+            await second_store.close()
+
+    asyncio.run(scenario())
+
+
+def test_real_forecast_cache_shares_requested_position_between_connections() -> None:
+    """Deux caches L2 retrouvent A dans Redis même si la réponse décrit la position B."""
+    async def scenario() -> None:
+        settings = Settings(
+            redis_url=TEST_REDIS_URL,
+            redis_key_prefix=f"test-{uuid4().hex}",
+            client_id_hmac_secret="test-secret",
+        )
+        first_store = RedisStore(settings)
+        second_store = RedisStore(settings)
+        first = RedisForecastCache(first_store, settings)
+        second = RedisForecastCache(second_store, settings)
+        forecast = ForecastResponse(
+            latitude=45.76,
+            longitude=4.86,
+            timezone="Europe/Paris",
+            generated_at="2026-09-08T14:05:00+02:00",
+            hours=[],
+        )
+        cache_key = first._cache_key(45.75, 4.85)
+        try:
+            assert await first_store.connect()
+            assert await second_store.connect()
+            await first.set(45.75, 4.85, forecast)
+
+            cached = await second.get(45.75, 4.85)
+            assert cached == forecast
+            assert cached is not None
+            assert (cached.latitude, cached.longitude) == (45.76, 4.86)
+            assert await second.get(45.76, 4.86) is None
+            assert 0 < await second_store.pttl(cache_key) <= (
+                settings.forecast_shared_cache_ttl_seconds * 1_000
+            )
+        finally:
+            await first_store.delete(cache_key)
             await first_store.close()
             await second_store.close()
 

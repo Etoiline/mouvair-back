@@ -3,6 +3,8 @@
 Ce cache L2 sérialise les modèles Pydantic et applique une durée de conservation.
 La fraîcheur de 15 minutes et les états de repli relèvent de ForecastService :
 une entrée conservée ici peut donc être trop ancienne pour être recommandée.
+Les coordonnées demandées identifient les entrées et les verrous ; celles de la
+réponse fournisseur restent des métadonnées et ne déterminent jamais la clé.
 """
 
 import asyncio
@@ -16,16 +18,23 @@ from .config import Settings
 from .models import ForecastResponse
 from .redis_store import RedisStore
 
+# v1 utilisait les coordonnées fournisseur à l’écriture et pouvait conserver une
+# entrée sous une autre identité. v2 isole ces entrées et leurs anciens verrous.
+FORECAST_CACHE_VERSION = "v2"
+
 
 class SharedForecastCache(Protocol):
     """Contrat injectable du L2 : lire, conserver et coordonner une récupération.
 
     Le service dépend de ces capacités plutôt que du client Redis concret, ce
     qui permet de simuler le partage entre instances dans les tests unitaires.
+    Toutes les coordonnées passées à ces méthodes sont celles de la demande.
     """
     async def get(self, latitude: float, longitude: float) -> ForecastResponse | None: ...
 
-    async def set(self, forecast: ForecastResponse) -> None: ...
+    async def set(
+        self, latitude: float, longitude: float, forecast: ForecastResponse
+    ) -> None: ...
 
     async def acquire_lock(self, latitude: float, longitude: float) -> str | None: ...
 
@@ -56,10 +65,16 @@ class RedisForecastCache:
             await self._store.delete(key)
             return None
 
-    async def set(self, forecast: ForecastResponse) -> None:
-        """Conserve le résultat et son generated_at d’origine pendant le TTL configuré."""
+    async def set(
+        self, latitude: float, longitude: float, forecast: ForecastResponse
+    ) -> None:
+        """Conserve le résultat sous la position demandée pendant le TTL configuré.
+
+        Les coordonnées et generated_at du fournisseur restent dans le contenu
+        sérialisé. Ils ne remplacent pas l’identité fournie explicitement par le service.
+        """
         await self._store.set(
-            self._cache_key(forecast.latitude, forecast.longitude),
+            self._cache_key(latitude, longitude),
             forecast.model_dump_json(),
             self._ttl,
         )
@@ -91,11 +106,15 @@ class RedisForecastCache:
 
     def _cache_key(self, latitude: float, longitude: float) -> str:
         """Versionne le format stocké pour distinguer les générations de contrat."""
-        return self._store.key("cache", "forecast", "v1", self._digest(latitude, longitude))
+        return self._store.key(
+            "cache", "forecast", FORECAST_CACHE_VERSION, self._digest(latitude, longitude)
+        )
 
     def _lock_key(self, latitude: float, longitude: float) -> str:
         """Utilise la même identité de position dans un espace de clés distinct du cache."""
-        return self._store.key("lock", "forecast", "v1", self._digest(latitude, longitude))
+        return self._store.key(
+            "lock", "forecast", FORECAST_CACHE_VERSION, self._digest(latitude, longitude)
+        )
 
     @staticmethod
     def _digest(latitude: float, longitude: float) -> str:

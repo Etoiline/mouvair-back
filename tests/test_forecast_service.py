@@ -1,8 +1,8 @@
 """Teste la politique de prévision sans serveur Redis ni fournisseur externe.
 
 Une horloge mutable fait franchir les seuils de fraîcheur sans attente réelle.
-Des fetchers séquencés simulent succès et pannes ; un cache partagé minimal
-permet de distinguer les états locaux de deux instances de ForecastService.
+Des fetchers séquencés simulent succès et pannes ; le véritable cache L2 utilise
+un stockage mémoire partagé pour vérifier les échanges entre deux instances.
 """
 
 import asyncio
@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from mouvair_api.config import Settings
+from mouvair_api.forecast_cache import RedisForecastCache
 from mouvair_api.forecast_service import ForecastService
 from mouvair_api.models import (
     Conditions,
@@ -21,6 +23,7 @@ from mouvair_api.models import (
     SlotConditions,
 )
 from mouvair_api.open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour
+from mouvair_api.redis_store import RedisStore
 from mouvair_api.scoring import calculate_score
 
 
@@ -49,39 +52,6 @@ class SequencedFetcher:
         if isinstance(outcome, OpenMeteoError):
             raise outcome
         return outcome
-
-
-class SharedForecastCache:
-    """Double de L2 suffisant pour vérifier le partage entre deux services.
-
-    Il conserve un seul résultat et un verrou simple, sans simuler les délais
-    Redis : les garanties atomiques réelles ont leur propre suite d’intégration.
-    """
-    def __init__(self) -> None:
-        self.forecast: ForecastResponse | None = None
-        self.locked = False
-
-    async def get(self, latitude: float, longitude: float) -> ForecastResponse | None:
-        del latitude, longitude
-        return self.forecast
-
-    async def set(self, forecast: ForecastResponse) -> None:
-        self.forecast = forecast
-
-    async def acquire_lock(self, latitude: float, longitude: float) -> str | None:
-        del latitude, longitude
-        if self.locked:
-            return None
-        self.locked = True
-        return "token"
-
-    async def release_lock(self, latitude: float, longitude: float, token: str) -> None:
-        del latitude, longitude, token
-        self.locked = False
-
-    async def wait(self, latitude: float, longitude: float) -> ForecastResponse | None:
-        del latitude, longitude
-        return self.forecast
 
 
 def forecast_at(
@@ -331,26 +301,35 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     assert list(service._cache) == [(1, 1), (3, 3)]
 
 
-def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
-    """Un L1 vide utilise le résultat L2 d’une autre instance sans nouvel appel fournisseur."""
+@pytest.mark.parametrize(
+    ("provider_latitude", "provider_longitude"),
+    [(45.75, 4.85), (45.76, 4.86)],
+)
+def test_two_instances_share_a_forecast_through_the_distributed_cache(
+    memory_redis_store: RedisStore,
+    provider_latitude: float,
+    provider_longitude: float,
+) -> None:
+    """Le L2 reste partagé si les coordonnées fournisseur diffèrent de celles demandées."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
-    shared = SharedForecastCache()
+    settings = Settings()
     calls = 0
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
         nonlocal calls
         calls += 1
-        return forecast_at(moment, latitude=latitude, longitude=longitude)
+        assert (latitude, longitude) == (45.75, 4.85)
+        return forecast_at(moment, latitude=provider_latitude, longitude=provider_longitude)
 
     first = ForecastService(
         fetcher,
         clock=MutableClock(moment),
-        shared_cache=shared,
+        shared_cache=RedisForecastCache(memory_redis_store, settings),
     )
     second = ForecastService(
         fetcher,
         clock=MutableClock(moment),
-        shared_cache=shared,
+        shared_cache=RedisForecastCache(memory_redis_store, settings),
     )
 
     async def scenario() -> tuple[ForecastResponse, ForecastResponse]:
@@ -364,3 +343,4 @@ def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
     assert direct.from_cache is False
     assert cached.from_cache is True
     assert cached.generated_at == direct.generated_at
+    assert (cached.latitude, cached.longitude) == (provider_latitude, provider_longitude)
