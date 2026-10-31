@@ -5,12 +5,16 @@ La fraîcheur de 15 minutes et les états de repli relèvent de ForecastService 
 une entrée conservée ici peut donc être trop ancienne pour être recommandée.
 Les coordonnées demandées identifient les entrées et les verrous ; celles de la
 réponse fournisseur restent des métadonnées et ne déterminent jamais la clé.
+La lecture contrôle le fuseau et les dates avant de laisser le service calculer
+l’âge des données ; les mesures manquantes restent des valeurs partielles valides.
 """
 
 import asyncio
 import hashlib
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
@@ -21,6 +25,32 @@ from .redis_store import RedisStore
 # v1 utilisait les coordonnées fournisseur à l’écriture et pouvait conserver une
 # entrée sous une autre identité. v2 isole ces entrées et leurs anciens verrous.
 FORECAST_CACHE_VERSION = "v2"
+
+
+def _cached_instant(value: str) -> datetime:
+    """Exige une date ISO avec décalage UTC, sans modifier sa représentation stockée."""
+    instant = datetime.fromisoformat(value)
+    if instant.utcoffset() is None:
+        # Une date naïve dépendrait du fuseau du serveur et fausserait l’âge du cache.
+        raise ValueError("Une date du cache doit comporter un décalage UTC")
+    return instant.astimezone(UTC)
+
+
+def _validate_cached_forecast(forecast: ForecastResponse) -> None:
+    """Vérifie les métadonnées nécessaires au service, indépendamment de leur fraîcheur.
+
+    Les chaînes du modèle public ne garantissent ni un fuseau connu ni une date
+    interprétable. Une ancienne prévision valide reste conservable pour le repli ;
+    une métadonnée invalide ne doit jamais être remplacée par l’heure courante.
+    """
+    ZoneInfo(forecast.timezone)
+    _cached_instant(forecast.generated_at)
+    for hour in forecast.hours:
+        start = _cached_instant(hour.time)
+        end = _cached_instant(hour.end_time)
+        # Comparer en UTC accepte les heures locales répétées ou sautées lors du DST.
+        if end - start != timedelta(hours=1):
+            raise ValueError("Un créneau du cache doit durer une heure réelle")
 
 
 class SharedForecastCache(Protocol):
@@ -66,8 +96,10 @@ class RedisForecastCache:
         if raw_value is None:
             return None
         try:
-            return ForecastResponse.model_validate_json(raw_value)
-        except (ValidationError, ValueError):
+            forecast = ForecastResponse.model_validate_json(raw_value)
+            _validate_cached_forecast(forecast)
+            return forecast
+        except (ValidationError, ValueError, ZoneInfoNotFoundError, OverflowError):
             await self._store.delete(key)
             return None
 

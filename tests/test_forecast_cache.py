@@ -6,11 +6,15 @@ de vérifier l’isolation des anciennes entrées et des anciens verrous v1.
 """
 
 import asyncio
+import json
+from datetime import UTC, datetime
 
 import pytest
 
+from forecast_payloads import air_payload, weather_payload
 from mouvair_api.config import Settings
 from mouvair_api.forecast_cache import RedisForecastCache
+from mouvair_api.forecast_slots import assemble_forecast
 from mouvair_api.models import ForecastResponse
 from mouvair_api.redis_store import RedisStore
 
@@ -25,6 +29,14 @@ def provider_forecast() -> ForecastResponse:
         generated_at="2026-09-08T14:05:00+02:00",
         hours=[],
     )
+
+
+@pytest.fixture
+def complete_forecast() -> ForecastResponse:
+    """Fournit de vrais créneaux pour exercer la validation des bornes temporelles."""
+    moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    start = moment.replace(minute=0)
+    return assemble_forecast(weather_payload(start), air_payload(start), moment)
 
 
 def test_cache_uses_requested_position_and_preserves_provider_metadata(
@@ -125,6 +137,118 @@ def test_corrupt_forecast_is_deleted_without_removing_another_position(
         assert await cache.get(45.75, 4.85) is None
         assert await memory_redis_store.get(corrupt_key) is None
         assert await cache.get(45.76, 4.86) == provider_forecast
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timezone", "Unknown/Invalid"),
+        ("timezone", "../UTC"),
+        ("timezone", ""),
+        ("generated_at", "invalid-date"),
+        ("generated_at", "2026-02-30T14:05:00+02:00"),
+        ("generated_at", "2026-09-08T14:05:00"),
+        ("generated_at", "2026-09-08"),
+        ("generated_at", ""),
+        ("generated_at", "0001-01-01T00:00:00+14:00"),
+    ],
+)
+def test_invalid_cached_metadata_is_deleted_without_changing_another_position(
+    memory_redis_store: RedisStore,
+    complete_forecast: ForecastResponse,
+    field: str,
+    value: str,
+) -> None:
+    """Un JSON bien formé est écarté si son fuseau ou sa date de récupération est invalide."""
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    key = cache._cache_key(45.75, 4.85)
+    payload = complete_forecast.model_dump(mode="json")
+    payload[field] = value
+
+    async def scenario() -> None:
+        await memory_redis_store.set(key, json.dumps(payload), 60)
+        await cache.set(45.76, 4.86, complete_forecast)
+
+        assert await cache.get(45.75, 4.85) is None
+        assert await memory_redis_store.get(key) is None
+        assert await cache.get(45.76, 4.86) == complete_forecast
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("time", "invalid-date"),
+        ("time", "2026-09-08T15:00:00"),
+        ("time", "2026-09-08"),
+        ("end_time", "invalid-date"),
+        ("end_time", "2026-09-08T16:00:00"),
+        ("end_time", "2026-09-08T14:00:00+02:00"),
+        ("end_time", "2026-09-08T15:00:00+02:00"),
+        ("end_time", "2026-09-08T15:30:00+02:00"),
+        ("end_time", "2026-09-08T17:00:00+02:00"),
+    ],
+)
+def test_invalid_cached_slot_times_are_deleted(
+    memory_redis_store: RedisStore,
+    complete_forecast: ForecastResponse,
+    field: str,
+    value: str,
+) -> None:
+    """Les bornes doivent être datées avec un décalage et former une heure réelle positive."""
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    key = cache._cache_key(45.75, 4.85)
+    payload = complete_forecast.model_dump(mode="json")
+    payload["hours"][0][field] = value
+
+    async def scenario() -> None:
+        await memory_redis_store.set(key, json.dumps(payload), 60)
+
+        assert await cache.get(45.75, 4.85) is None
+        assert await memory_redis_store.get(key) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected_start", "expected_end"),
+    [
+        (
+            datetime(2026, 10, 24, 23, 30, tzinfo=UTC),
+            "2026-10-25T02:00+02:00", "2026-10-25T02:00+01:00",
+        ),
+        (
+            datetime(2026, 3, 28, 23, 30, tzinfo=UTC),
+            "2026-03-29T01:00+01:00", "2026-03-29T03:00+02:00",
+        ),
+    ],
+)
+def test_cache_preserves_dst_slots_and_missing_measurements(
+    memory_redis_store: RedisStore,
+    moment: datetime,
+    expected_start: str,
+    expected_end: str,
+) -> None:
+    """Un changement de décalage ou une mesure absente ne rend pas la prévision corrompue."""
+    start = moment.replace(minute=0)
+    weather = weather_payload(start)
+    weather["hourly"]["precipitation"] = [None] * 30
+    forecast = assemble_forecast(weather, air_payload(start), moment)
+    cache = RedisForecastCache(memory_redis_store, Settings())
+
+    async def scenario() -> None:
+        await cache.set(45.75, 4.85, forecast)
+
+        cached = await cache.get(45.75, 4.85)
+        assert cached == forecast
+        assert cached is not None
+        assert cached.hours[0].time == expected_start
+        assert cached.hours[0].end_time == expected_end
+        assert cached.hours[0].conditions.precipitation is None
+        assert cached.hours[0].scores["walking"].overall.status == "incomplet"
 
     asyncio.run(scenario())
 

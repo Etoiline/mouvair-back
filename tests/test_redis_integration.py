@@ -7,6 +7,7 @@ Les tests unitaires ne suffisent pas à démontrer l’atomicité des scripts Lu
 """
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -221,7 +222,18 @@ def test_real_forecast_cache_expires_after_its_configured_ttl() -> None:
     asyncio.run(scenario())
 
 
-def test_real_forecast_service_rebuilds_a_corrupt_cache_entry() -> None:
+@pytest.mark.parametrize(
+    "corrupted_fields",
+    [
+        None,
+        {"timezone": "Unknown/Invalid"},
+        {"generated_at": "invalid-date"},
+        {"generated_at": "2026-09-08T14:05:00"},
+    ],
+)
+def test_real_forecast_service_rebuilds_a_corrupt_cache_entry(
+    corrupted_fields: dict[str, str] | None,
+) -> None:
     """Une entrée Redis invalide est remplacée par une prévision calculée et réutilisable."""
     async def scenario() -> None:
         settings = Settings(redis_url=TEST_REDIS_URL, redis_key_prefix=f"test-{uuid4().hex}")
@@ -229,19 +241,24 @@ def test_real_forecast_service_rebuilds_a_corrupt_cache_entry() -> None:
         cache = RedisForecastCache(store, settings)
         moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
         start = moment.replace(minute=0)
+        expected = assemble_forecast(weather_payload(start), air_payload(start), moment)
         calls = 0
 
         async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
             nonlocal calls
             calls += 1
-            return assemble_forecast(weather_payload(start), air_payload(start), moment)
+            return expected
 
         service = ForecastService(fetcher, clock=MutableClock(moment), shared_cache=cache)
         cache_key = cache._cache_key(45.75, 4.85)
         lock_key = cache._lock_key(45.75, 4.85)
         try:
             assert await store.connect()
-            await store.set(cache_key, '{"hours": []}', 60)
+            payload = (
+                {"hours": []} if corrupted_fields is None
+                else {**expected.model_dump(mode="json"), **corrupted_fields}
+            )
+            await store.set(cache_key, json.dumps(payload), 60)
             direct = await service.get_forecast(45.75, 4.85)
             # Une nouvelle instance ne doit pas dépendre du L1 de la première.
             other_service = ForecastService(fetcher, clock=MutableClock(moment), shared_cache=cache)

@@ -81,7 +81,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_open_meteo.py` | Paramètres HTTP et passage des réponses météo et air à l’assemblage. |
 | `test_forecast_slots.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
 | `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
-| `test_forecast_cache.py` | Identité demandée, clés v1/v2, entrées corrompues et attente bornée. |
+| `test_forecast_cache.py` | Identité, clés v1/v2, JSON, fuseaux, dates, créneaux et attente bornée. |
 | `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
 | `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota et propagation de Retry-After. |
 | `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
@@ -132,6 +132,18 @@ identifiée par son `generated_at`. L’ancienne entrée peut rester présente d
 chargement : elle ne doit pas être confondue avec le nouveau résultat. Si aucune nouvelle
 génération n’arrive avant le délai configuré, le service utilise son repli habituel ou signale
 l’indisponibilité lorsqu’il ne possède aucun historique.
+
+À chaque lecture du L2, le JSON doit respecter le modèle de prévision et ses métadonnées
+temporelles doivent être utilisables : le fuseau doit être reconnu, `generated_at`, `time` et
+`end_time` doivent être des dates ISO avec décalage UTC, et chaque créneau doit durer une heure
+réelle. La comparaison en UTC conserve les créneaux valides lors des changements d’heure.
+Les chaînes et leurs décalages restent inchangés dans la réponse publique.
+
+Une entrée invalide est supprimée puis traitée comme une absence de cache : le service tente
+une récupération fournisseur, ou utilise un historique local valide si son repli est nécessaire.
+Une date invalide n’est donc pas remplacée par l’heure courante pour lui attribuer une fausse
+fraîcheur. Les mesures absentes et les notes `null` restent autorisées ; l’âge des données est
+toujours évalué séparément par le service de prévision.
 
 Les coordonnées exactes de la demande, sans arrondi supplémentaire, identifient le cache mémoire,
 les entrées Redis et leurs verrous. Elles sont transmises explicitement à l’écriture du L2.

@@ -5,6 +5,8 @@ simulé. L’horloge contrôlée permet de vérifier le JSON reçu par le fronte
 les états de repli et les limites HTTP sans appeler Open-Meteo.
 """
 
+import asyncio
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -18,6 +20,7 @@ from mouvair_api.forecast_cache import RedisForecastCache
 from mouvair_api.forecast_service import ForecastService
 from mouvair_api.forecast_slots import assemble_forecast
 from mouvair_api.main import create_app
+from mouvair_api.models import ForecastResponse
 from mouvair_api.open_meteo import OpenMeteoQuotaError
 from mouvair_api.redis_store import RedisStore
 
@@ -178,18 +181,26 @@ def test_forecast_quota_error_without_cache_preserves_retry_after(
     ("age", "state", "recommendation_available"),
     [(timedelta(minutes=16), "refresh_failed", True), (timedelta(minutes=61), "stale", False)],
 )
+@pytest.mark.parametrize("corrupt_shared_entry", [False, True])
 def test_forecast_exposes_failed_refresh_and_stale_states_in_json(
     forecast_client: TestClient,
     forecast_clock: MutableClock,
     forecast_fetcher: SequencedFetcher,
+    memory_redis_store: RedisStore,
     age: timedelta,
     state: str,
     recommendation_available: bool,
+    corrupt_shared_entry: bool,
 ) -> None:
     """Le frontend reçoit l’âge réel et les marqueurs de repli malgré un quota épuisé."""
     params = {"latitude": 45.75, "longitude": 4.85}
     first = forecast_client.get("/api/forecast", params=params)
     forecast_clock.value += age
+    if corrupt_shared_entry:
+        # Un L2 corrompu ne doit pas remplacer la dernière prévision L1 encore valide.
+        cache = RedisForecastCache(memory_redis_store, Settings())
+        payload = {**first.json(), "generated_at": "invalid-date"}
+        asyncio.run(memory_redis_store.set(cache._cache_key(45.75, 4.85), json.dumps(payload), 60))
     fallback = forecast_client.get("/api/forecast", params=params)
 
     assert first.status_code == fallback.status_code == 200
@@ -262,3 +273,49 @@ def test_forecast_client_limit_applies_to_cache_hits_and_allows_cors_preflight(
     assert int(limited.headers["Retry-After"]) > 0
     assert limited.json() == {"detail": "Trop de requêtes, veuillez réessayer plus tard"}
     assert forecast_fetcher.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timezone", "Unknown/Invalid"),
+        ("generated_at", "invalid-date"),
+        ("generated_at", "2026-09-08T14:05:00"),
+    ],
+)
+@pytest.mark.parametrize("provider_unavailable", [False, True])
+def test_forecast_does_not_serve_a_cache_entry_with_invalid_metadata(
+    forecast_client: TestClient,
+    forecast_fetcher: SequencedFetcher,
+    memory_redis_store: RedisStore,
+    field: str,
+    value: str,
+    provider_unavailable: bool,
+) -> None:
+    """Une entrée invalide est recalculée ou produit un 503, sans 500 ni fausse fraîcheur."""
+    valid = forecast_fetcher.outcomes[0]
+    assert isinstance(valid, ForecastResponse)
+    payload = valid.model_dump(mode="json")
+    payload[field] = value
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    key = cache._cache_key(45.75, 4.85)
+    asyncio.run(memory_redis_store.set(key, json.dumps(payload), 60))
+    if provider_unavailable:
+        forecast_fetcher.outcomes = (OpenMeteoQuotaError("quota épuisé", 42),)
+
+    params = {"latitude": 45.75, "longitude": 4.85}
+    response = forecast_client.get("/api/forecast", params=params)
+
+    assert forecast_fetcher.calls == 1
+    if provider_unavailable:
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "42"
+        assert response.json() == {"detail": "quota épuisé"}
+        assert asyncio.run(memory_redis_store.get(key)) is None
+    else:
+        assert response.status_code == 200
+        assert response.json() == valid.model_dump(mode="json")
+        cached = forecast_client.get("/api/forecast", params=params)
+        assert cached.status_code == 200
+        assert cached.json() == {**response.json(), "from_cache": True}
+        assert forecast_fetcher.calls == 1
