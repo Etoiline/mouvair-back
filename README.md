@@ -63,8 +63,8 @@ restent informatifs et ne participent à aucune note.
 - `pyproject.toml` décrit le package, ses dépendances, la découverte des sources, Pytest et Ruff.
 - `.env.example` explique chaque groupe de variables ; `.env` contient la configuration locale
   chargée par l’option `--env-file` d’Uvicorn et reste exclu de Git et de l’image Docker.
-- `compose.yaml` fournit Redis local avec son volume persistant ; le `Dockerfile` construit le
-  serveur API de production, exécuté avec un utilisateur dédié.
+- `compose.yaml` démarre l’API et Redis local avec son volume persistant ; le `Dockerfile`
+  construit le serveur API, exécuté avec un utilisateur dédié.
 - `.gitignore` et `.dockerignore` expliquent les fichiers locaux ou générés à exclure.
 - `scripts/release.py` vérifie la cohérence des versions et du changelog avant de préparer les
   fichiers puis de créer le commit de release local. `--dry-run` conserve le choix interactif.
@@ -196,10 +196,56 @@ cohérence éventuelle.
 
 ## Commandes
 
+### API et Redis avec Docker
+
+Pour tester le backend localement sans installer Python sur le poste :
+
+```powershell
+cd E:\projects\mouvair\mouvair-back
+docker compose up -d --build --wait
+docker compose ps
+```
+
+Compose construit l’image de l’API, attend que Redis soit disponible, puis vérifie que l’API
+répond avec un état `ok` et une connexion Redis `ok`. Les deux services doivent apparaître
+avec l’état `healthy` dans Docker. L’API est accessible sur `http://localhost:8000`, sa
+documentation sur `http://localhost:8000/docs` et son diagnostic sur `http://localhost:8000/health`.
+
+Le fichier `.env` est facultatif dans ce mode. S’il existe, ses valeurs sont transmises au
+conteneur ; Compose fixe le port interne à `8000`, l’adresse Redis à `redis://redis:6379/0`
+et le mode de panne à `closed`. Les ports publiés restent limités au poste local.
+
+Pour utiliser l’interface, lancer le frontend dans un autre terminal :
+
+```powershell
+cd E:\projects\mouvair\mouvair-front
+pnpm install
+pnpm dev
+```
+
+Le site est disponible sur `http://localhost:5173` et utilise l’API locale par défaut.
+Après une modification du backend, relancer `docker compose up -d --build --wait` pour
+reconstruire son image. Pour consulter ses journaux :
+
+```powershell
+docker compose logs -f api
+```
+
+Pour arrêter l’environnement en conservant les données Redis :
+
+```powershell
+docker compose stop
+```
+
+### Développement avec Uvicorn sur le poste hôte
+
+Ce mode facilite le rechargement automatique du code. Si l’API Docker est déjà lancée,
+arrêter son service avec `docker compose stop api` pour libérer le port `8000`.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d redis
 .\.venv\Scripts\python.exe -m uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env
 ```
