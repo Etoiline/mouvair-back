@@ -1,5 +1,7 @@
 # Changelog
 
+- Validate cached forecast timezones, offset-aware timestamps and one-hour slots, discard invalid entries, and preserve valid fallback data.
+
 - Apply CORS to client rate-limit responses and expose Retry-After so browsers can read 429 errors and retry delays.
 
 - Expand forecast API and Redis integration tests, fix concurrent refresh waiting, and add GitHub Actions checks with Redis.
