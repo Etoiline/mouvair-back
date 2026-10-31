@@ -1,5 +1,7 @@
 # Changelog
 
+- Add a local Docker Compose API service with Redis readiness, environment configuration, health checks, and startup instructions.
+
 - Align weather explanation intensity with the displayed weather and overall ratings.
 
 - Separate forecast assembly and time rules from Open-Meteo transport, introduce shared data errors, and reorganize tests by responsibility.
