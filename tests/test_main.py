@@ -1,3 +1,10 @@
+"""Vérifie le contrat HTTP avec le cycle de vie réel de l’application FastAPI.
+
+TestClient démarre et arrête les ressources dans son bloc with. Les services
+remplacés dans app.state isolent les traductions HTTP du réseau fournisseur ;
+les configurations sans Redis exercent les modes local et closed.
+"""
+
 from fastapi.testclient import TestClient
 
 from mouvair_api.config import Settings
@@ -7,10 +14,12 @@ from mouvair_api.open_meteo import OpenMeteoQuotaError
 
 
 class StubGeocoding:
+    """Service prévisible pour tester une ville ou une erreur de quota au niveau HTTP."""
     def __init__(self, error: OpenMeteoQuotaError | None = None) -> None:
         self.error = error
 
     async def search(self, query: str, count: int) -> list[Location]:
+        """Ignore la recherche et produit uniquement l’issue configurée par le test."""
         del query, count
         if self.error is not None:
             raise self.error
@@ -18,6 +27,7 @@ class StubGeocoding:
 
 
 def test_health_reports_degraded_without_redis() -> None:
+    """L’API répond toujours 200, avec un diagnostic Redis explicite dans son corps JSON."""
     with TestClient(create_app(Settings(redis_failure_mode="local"))) as client:
         response = client.get("/health")
 
@@ -26,6 +36,7 @@ def test_health_reports_degraded_without_redis() -> None:
 
 
 def test_location_search_requires_three_characters() -> None:
+    """La validation FastAPI doit refuser une saisie trop courte avant le service de recherche."""
     with TestClient(create_app(Settings(redis_failure_mode="local"))) as client:
         response = client.get("/api/locations", params={"q": "Ly"})
 
@@ -33,6 +44,7 @@ def test_location_search_requires_three_characters() -> None:
 
 
 def test_provider_calls_fail_closed_when_redis_is_not_configured() -> None:
+    """Sans protection partagée, le mode closed retourne 503 plutôt que d’appeler le fournisseur."""
     with TestClient(create_app(Settings(redis_failure_mode="closed"))) as client:
         response = client.get("/api/locations", params={"q": "Lyon"})
 
@@ -42,6 +54,7 @@ def test_provider_calls_fail_closed_when_redis_is_not_configured() -> None:
 
 
 def test_location_search_returns_a_quota_503_with_retry_after() -> None:
+    """La route conserve le message et le délai d’une erreur de budget fournie par le service."""
     app = create_app(Settings(redis_failure_mode="local"))
     with TestClient(app) as client:
         app.state.geocoding_service = StubGeocoding(OpenMeteoQuotaError("limite", 42))
@@ -53,6 +66,7 @@ def test_location_search_returns_a_quota_503_with_retry_after() -> None:
 
 
 def test_location_client_limit_returns_429_and_keeps_clients_separate() -> None:
+    """Changer la ville recherchée ne réinitialise pas le budget du même client réseau."""
     settings = Settings(
         redis_failure_mode="local",
         location_rate_limit_minute=1,

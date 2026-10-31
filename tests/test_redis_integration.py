@@ -1,3 +1,11 @@
+"""Vérifie les garanties serveur contre une instance Redis réelle.
+
+TEST_REDIS_URL active cette suite et doit pointer vers une base de test dédiée,
+par convention la base 15 locale. Les clés utilisent des identifiants uniques et
+sont supprimées dans finally ; aucune purge globale de la base n’est effectuée.
+Les tests unitaires ne suffisent pas à démontrer l’atomicité des scripts Lua.
+"""
+
 import asyncio
 import os
 from uuid import uuid4
@@ -15,6 +23,7 @@ from mouvair_api.rate_limit import (
 )
 from mouvair_api.redis_store import RedisStore
 
+# Une absence de variable ignore la suite au lieu de toucher à une base non choisie.
 TEST_REDIS_URL = os.getenv("TEST_REDIS_URL")
 
 pytestmark = [
@@ -24,6 +33,7 @@ pytestmark = [
 
 
 def test_real_redis_never_overspends_a_concurrent_window() -> None:
+    """Vingt réservations concurrentes doivent produire exactement cinq autorisations."""
     async def scenario() -> None:
         settings = Settings(redis_url=TEST_REDIS_URL, client_id_hmac_secret="test-secret")
         store = RedisStore(settings)
@@ -46,6 +56,7 @@ def test_real_redis_never_overspends_a_concurrent_window() -> None:
 
 
 def test_real_redis_rejects_a_two_unit_reservation_without_partial_debit() -> None:
+    """Avec une seule unité libre, refuser un coût de deux ne doit rien débiter."""
     async def scenario() -> None:
         settings = Settings(redis_url=TEST_REDIS_URL, client_id_hmac_secret="test-secret")
         store = RedisStore(settings)
@@ -65,6 +76,7 @@ def test_real_redis_rejects_a_two_unit_reservation_without_partial_debit() -> No
 
 
 def test_real_redis_lock_can_only_be_released_by_its_owner() -> None:
+    """Un mauvais jeton ne supprime pas le verrou ; le bon jeton permet sa reprise."""
     async def scenario() -> None:
         settings = Settings(redis_url=TEST_REDIS_URL, client_id_hmac_secret="test-secret")
         store = RedisStore(settings)
@@ -86,6 +98,7 @@ def test_real_redis_lock_can_only_be_released_by_its_owner() -> None:
 
 
 def test_real_redis_shares_a_provider_cooldown_between_instances() -> None:
+    """L’attente écrite par une connexion empêche une autre connexion de réserver."""
     async def scenario() -> None:
         scope = f"test-{uuid4().hex}"
         settings = Settings(
@@ -116,6 +129,7 @@ def test_real_redis_shares_a_provider_cooldown_between_instances() -> None:
 
 
 def test_health_reports_a_real_redis_connection() -> None:
+    """Le diagnostic HTTP est positif quand le cycle de vie joint effectivement Redis."""
     settings = Settings(
         redis_url=TEST_REDIS_URL,
         redis_key_prefix=f"test-{uuid4().hex}",

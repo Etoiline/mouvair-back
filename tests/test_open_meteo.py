@@ -1,3 +1,10 @@
+"""Teste l’assemblage des séries fournisseur sans effectuer de requêtes externes.
+
+Les jeux météo et air contrôlent les valeurs à chaque borne. Les scénarios
+couvrent la jointure temporelle, les données partielles, les pollens et les
+transitions de fuseau tout en conservant des intervalles réels de 3 600 secondes.
+"""
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -20,10 +27,12 @@ from mouvair_api.scoring import SNOW_ALERT, THUNDERSTORM_ALERT
 
 
 def timestamps(start: datetime, count: int = 30) -> list[int]:
+    """Génère des instants horaires Unix pour simuler le format demandé au fournisseur."""
     return [int((start + timedelta(hours=index)).timestamp()) for index in range(count)]
 
 
 def weather_payload(start: datetime, count: int = 30) -> dict[str, Any]:
+    """Fournit une météo homogène favorable que chaque scénario peut modifier par borne."""
     return {
         "latitude": 45.75,
         "longitude": 4.85,
@@ -40,6 +49,7 @@ def weather_payload(start: datetime, count: int = 30) -> dict[str, Any]:
 
 
 def air_payload(start: datetime, count: int = 30) -> dict[str, Any]:
+    """Fournit un AQI et les six pollens, avec une série alignée sur les mêmes instants."""
     hourly: dict[str, list[int | float | None]] = {
         "time": timestamps(start, count),
         "european_aqi": [20.0] * count,
@@ -56,11 +66,13 @@ def air_payload(start: datetime, count: int = 30) -> dict[str, Any]:
 
 
 def weather_factor_value(hour, sport: str, factor_id: str) -> float | None:
+    """Lit la mesure réellement choisie pour le sport dans ses facteurs explicatifs."""
     factors = hour.scores[sport].weather.factors
     return next(factor.value for factor in factors if factor.id == factor_id)
 
 
 def test_assemble_uses_the_two_real_hour_boundaries() -> None:
+    """Oppose les valeurs de début et de fin pour vérifier chaque règle d’agrégation."""
     base = datetime(2026, 9, 8, 12, tzinfo=UTC)
     weather = weather_payload(base)
     air = air_payload(base)
@@ -76,6 +88,7 @@ def test_assemble_uses_the_two_real_hour_boundaries() -> None:
     air_hourly["european_aqi"][1:3] = [30.0, 50.0]
     air_hourly["alder_pollen"][1:3] = [3.0, 7.0]
     air_hourly["birch_pollen"][1:3] = [None, 5.0]
+    # Inverser les séries air doit rester sans effet sur la jointure par timestamp.
     for values in air_hourly.values():
         values.reverse()
 
@@ -106,6 +119,7 @@ def test_assemble_uses_the_two_real_hour_boundaries() -> None:
 
 
 def test_missing_endpoint_keeps_slot_and_known_alert() -> None:
+    """Une borne inconnue conserve le créneau et la neige détectée, avec les notes partielles."""
     base = datetime(2026, 9, 8, 12, tzinfo=UTC)
     weather = weather_payload(base)
     air = air_payload(base)
@@ -133,6 +147,7 @@ def test_missing_endpoint_keeps_slot_and_known_alert() -> None:
 
 
 def test_air_series_is_not_stitched_by_array_position() -> None:
+    """Retirer une heure air ne doit pas décaler les valeurs suivantes sur les heures météo."""
     base = datetime(2026, 9, 8, 12, tzinfo=UTC)
     weather = weather_payload(base)
     air = air_payload(base)
@@ -153,6 +168,7 @@ def test_air_series_is_not_stitched_by_array_position() -> None:
 
 
 def test_dst_fallback_keeps_a_real_one_hour_interval() -> None:
+    """Au passage à l’heure d’hiver, deux 02 h avec offsets distincts bornent une vraie heure."""
     base = datetime(2026, 10, 24, 23, tzinfo=UTC)
     result = _assemble_forecast(
         weather_payload(base),
@@ -169,6 +185,7 @@ def test_dst_fallback_keeps_a_real_one_hour_interval() -> None:
 
 
 def test_exact_full_hour_can_be_the_first_departure() -> None:
+    """L’heure exacte reste proposée ; une seconde plus tard impose le départ suivant."""
     moment = datetime(2026, 9, 8, 13, tzinfo=UTC)
     timezone = ZoneInfo("Europe/Paris")
     assert _next_full_hour(moment, timezone) == moment
@@ -195,10 +212,12 @@ def test_next_full_hour_uses_the_city_timezone(
     moment: datetime,
     expected: datetime,
 ) -> None:
+    """L’alignement local tient compte des décalages de 30 et de 45 minutes par rapport à UTC."""
     assert _next_full_hour(moment, ZoneInfo(timezone_name)) == expected
 
 
 def test_half_hour_timezone_assembles_local_full_hour_slots() -> None:
+    """Le départ à 19 h en Inde correspond à une demi-heure UTC et reste localement plein."""
     base = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
     weather = weather_payload(base)
     weather["timezone"] = "Asia/Kolkata"
@@ -214,6 +233,7 @@ def test_half_hour_timezone_assembles_local_full_hour_slots() -> None:
 
 
 def test_spring_transition_skips_the_nonexistent_local_hour() -> None:
+    """Le saut du printemps ignore l’heure absente tout en gardant une durée de 3 600 secondes."""
     base = datetime(2026, 3, 28, 23, tzinfo=UTC)
     result = _assemble_forecast(
         weather_payload(base),
@@ -230,6 +250,7 @@ def test_spring_transition_skips_the_nonexistent_local_hour() -> None:
 
 
 def test_malformed_timestamps_raise_a_provider_error() -> None:
+    """Des dates textuelles au lieu de timestamps Unix ne doivent pas produire de faux créneaux."""
     weather = weather_payload(datetime(2026, 9, 8, 12, tzinfo=UTC))
     air = air_payload(datetime(2026, 9, 8, 12, tzinfo=UTC))
     weather["hourly"]["time"] = ["2026-09-08T12:00"]
@@ -244,10 +265,12 @@ def test_malformed_timestamps_raise_a_provider_error() -> None:
 
 
 def test_get_forecast_requests_unix_times_and_all_pollens(monkeypatch) -> None:
+    """Inspecte les paramètres sortants pour maintenir l’horizon et toutes les séries requises."""
     base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     captured: dict[str, dict[str, Any]] = {}
 
     async def fake_get_json(client, url: str, params: dict[str, Any]):
+        """Capture chaque demande et renvoie le jeu correspondant sans sortie réseau."""
         captured[url] = params
         if url == FORECAST_URL:
             return weather_payload(base)

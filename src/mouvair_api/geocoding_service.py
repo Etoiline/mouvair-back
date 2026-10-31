@@ -1,3 +1,10 @@
+"""Gère les recherches de villes et évite les appels fournisseur redondants.
+
+Un LRU en mémoire précède le cache Redis partagé. Les résultats positifs et
+négatifs ont des durées distinctes ; les tâches locales et les verrous Redis
+regroupent les recherches identiques. Le quota reste géré par le fetcher injecté.
+"""
+
 import asyncio
 import hashlib
 import json
@@ -20,6 +27,7 @@ CacheKey = tuple[str, int]
 
 
 class GeocodingStore(Protocol):
+    """Primitives de stockage suffisantes au service, simulables sans serveur Redis."""
     def key(self, *parts: str) -> str: ...
 
     async def get(self, key: str) -> str | None: ...
@@ -35,17 +43,23 @@ class GeocodingStore(Protocol):
 
 @dataclass(frozen=True)
 class LocalGeocodingEntry:
+    """Résultats et échéance monotone, indépendants des changements d’heure système."""
     locations: list[Location]
     expires_at: float
 
 
 def normalize_location_query(query: str) -> str:
-    """Uniformise les variantes sans confondre volontairement les accents."""
+    """Uniformise Unicode et les espaces sans confondre volontairement les accents.
+
+    La casse est normalisée uniquement pour la clé ; la requête envoyée au
+    fournisseur conserve son écriture nettoyée pour la recherche des toponymes.
+    """
     normalized = unicodedata.normalize("NFKC", query)
     return " ".join(normalized.split())
 
 
 class GeocodingService:
+    """Orchestre le géocodage en français avec deux caches et une coordination partagée."""
     def __init__(
         self,
         fetcher: LocationFetcher,
@@ -54,6 +68,7 @@ class GeocodingService:
         *,
         clock: Clock | None = None,
     ) -> None:
+        """Injecte le fournisseur, le stockage et une horloge monotone remplaçable en test."""
         self._fetcher = fetcher
         self._store = store
         self._positive_ttl = settings.geocoding_cache_ttl_seconds
@@ -66,9 +81,15 @@ class GeocodingService:
         self._inflight: dict[CacheKey, asyncio.Task[list[Location]]] = {}
 
     async def search(self, query: str, count: int = 5) -> list[Location]:
+        """Cherche une requête normalisée, puis partage une tâche unique en cas de manque.
+
+        Le seuil s’applique après nettoyage : trois caractères bruts ne suffisent
+        pas si la requête ne contient en réalité qu’une lettre et des espaces.
+        """
         normalized = normalize_location_query(query)
         if len(normalized) < 3:
             return []
+        # casefold réunit les variantes de casse ; count distingue les tailles de réponse.
         key = (normalized.casefold(), count)
         cached = self._local(key)
         if cached is not None:
@@ -84,9 +105,11 @@ class GeocodingService:
             task = asyncio.create_task(self._load(key, normalized, count))
             self._inflight[key] = task
             task.add_done_callback(lambda finished: self._clear_inflight(key, finished))
+        # Un demandeur annulé ne doit pas interrompre la recherche partagée par les autres.
         return await asyncio.shield(task)
 
     def _local(self, key: CacheKey) -> list[Location] | None:
+        """Écarte les entrées expirées et renvoie des copies protégeant le cache local."""
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -97,6 +120,7 @@ class GeocodingService:
         return [location.model_copy(deep=True) for location in entry.locations]
 
     def _store_local(self, key: CacheKey, locations: list[Location]) -> None:
+        """Applique le TTL positif ou négatif et maintient la capacité maximale du LRU."""
         ttl = self._positive_ttl if locations else self._negative_ttl
         copies = [location.model_copy(deep=True) for location in locations]
         self._cache[key] = LocalGeocodingEntry(copies, self._clock() + ttl)
@@ -105,6 +129,7 @@ class GeocodingService:
             self._cache.popitem(last=False)
 
     async def _load(self, key: CacheKey, query: str, count: int) -> list[Location]:
+        """Prend le verrou distribué ou attend le résultat d’une recherche identique."""
         lock_key = self._lock_key(key)
         try:
             token = await self._store.acquire_lock(lock_key, self._lock_ttl)
@@ -121,6 +146,7 @@ class GeocodingService:
             return shared
 
         try:
+            # Une instance a pu remplir le cache entre sa première lecture et ce verrou.
             shared = await self._shared(key)
             if shared is not None:
                 self._store_local(key, shared)
@@ -133,6 +159,11 @@ class GeocodingService:
     async def _fetch_and_cache(
         self, key: CacheKey, query: str, count: int
     ) -> list[Location]:
+        """Appelle le fournisseur puis conserve aussi une liste vide pendant son TTL court.
+
+        L’écriture Redis est facultative pour servir un résultat déjà obtenu ; la
+        copie retournée empêche l’appelant d’altérer les objets gardés en mémoire.
+        """
         locations = await self._fetcher(query, count)
         self._store_local(key, locations)
         ttl = self._positive_ttl if locations else self._negative_ttl
@@ -145,6 +176,7 @@ class GeocodingService:
         return [location.model_copy(deep=True) for location in locations]
 
     async def _shared(self, key: CacheKey) -> list[Location] | None:
+        """Valide le JSON Redis et distingue une liste vide valide d’une absence de cache."""
         shared_key = self._shared_key(key)
         try:
             raw_value = await self._store.get(shared_key)
@@ -163,6 +195,7 @@ class GeocodingService:
             return None
 
     async def _wait_for_shared(self, key: CacheKey) -> list[Location] | None:
+        """Interroge brièvement le L2 sans immobiliser la boucle asynchrone."""
         deadline = monotonic() + self._lock_wait
         while monotonic() < deadline:
             await asyncio.sleep(0.05)
@@ -172,14 +205,17 @@ class GeocodingService:
         return None
 
     def _shared_key(self, key: CacheKey) -> str:
+        """Inclut requête, taille et langue dans une clé versionnée de résultats."""
         digest = hashlib.sha256(f"{key[0]}\0{key[1]}\0fr".encode()).hexdigest()
         return self._store.key("cache", "geocoding", "v1", digest)
 
     def _lock_key(self, key: CacheKey) -> str:
+        """Coordonne exactement le même périmètre de recherche que la clé de cache."""
         digest = hashlib.sha256(f"{key[0]}\0{key[1]}\0fr".encode()).hexdigest()
         return self._store.key("lock", "geocoding", "v1", digest)
 
     def _clear_inflight(self, key: CacheKey, task: asyncio.Task[list[Location]]) -> None:
+        """Oublie une tâche terminée sans retirer une éventuelle nouvelle tâche de même clé."""
         if self._inflight.get(key) is task:
             del self._inflight[key]
         if not task.cancelled():
