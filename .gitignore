@@ -1,9 +1,13 @@
+# Environnement Python installé localement, reproductible depuis pyproject.toml.
 .venv/
+# Fichiers générés par Python et par l’installation du package.
 __pycache__/
 *.py[cod]
 *.egg-info/
+# Caches de vérification et répertoires temporaires, sans valeur pour le dépôt.
 .pytest_cache/
 pytest-cache-files-*/
 .ruff_cache/
 .tmp/
+# Configuration propre au poste et secrets ; seul .env.example est versionné.
 .env

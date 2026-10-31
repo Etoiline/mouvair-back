@@ -8,10 +8,72 @@ Pour chaque activité et chaque créneau, le moteur sépare désormais :
 - `air` : note air, indice européen AQI, catégorie et recommandations générales ;
 - `overall` : note globale combinant météo et air selon l’activité.
 
-Une note impossible à calculer vaut `null` et porte le statut `incomplet`. Une note disponible est
-arrondie à l’entier pour l’affichage, après conservation des décimales pendant tous les calculs.
-Le contrat `SportScore` expose uniquement ces trois sections afin de conserver une source claire
-pour chaque note, ses facteurs et ses explications.
+Une note impossible à calculer vaut `null` ; les sections `weather` et `overall` portent alors le
+statut `incomplet`. Une note disponible est arrondie à l’entier pour l’affichage, après conservation
+des décimales pendant tous les calculs. Le contrat `SportScore` contient les métadonnées `sport` et
+`label`, puis ces trois sections pour chaque note, ses facteurs et ses explications.
+
+## Organisation et lecture du code
+
+Le package Python se trouve dans `src/mouvair_api`. Ses modules sont commentés en français :
+les docstrings expliquent les contrats et les commentaires détaillent les choix de traitement,
+notamment les plafonds, les bornes temporelles et la coordination entre requêtes.
+
+| Module | Responsabilité |
+|---|---|
+| `__init__.py` | Version du package, synchronisée par le script de release. |
+| `main.py` | Construction de FastAPI, cycle de vie des connexions, CORS, routes et erreurs HTTP. |
+| `config.py` | Configuration immuable, lecture de l’environnement et validation des limites. |
+| `models.py` | Contrat Pydantic des villes, mesures, pollens, scores et prévisions. |
+| `open_meteo.py` | Appels fournisseur, nettoyage des séries, jointure temporelle et créneaux. |
+| `scoring.py` | Profils sportifs, courbes, notes précises, plafonds, arrondis et explications. |
+| `forecast_service.py` | Cache mémoire L1, fraîcheur, fenêtre de 24 départs et réponse de secours. |
+| `forecast_cache.py` | Sérialisation des prévisions dans le L2 Redis et verrou distribué. |
+| `geocoding_service.py` | Normalisation des recherches, caches positif et négatif, mutualisation. |
+| `rate_limit.py` | Fenêtres glissantes, réservations atomiques, attente fournisseur et limites client. |
+| `client_identity.py` | Adresse réseau fiable derrière les proxies puis identifiant HMAC. |
+| `redis_store.py` | Connexions, commandes, verrous à jeton et délai de repli après une panne Redis. |
+
+Pour suivre une requête de prévision, commencer par `main.py`, puis `ForecastService.get_forecast`,
+`OpenMeteoGateway.get_forecast`, l’assemblage des créneaux dans `open_meteo.py` et enfin le moteur
+`scoring.py`. `models.py` décrit les objets échangés tout au long de ce parcours.
+
+Les ressources réseau sont créées au démarrage dans le gestionnaire `lifespan` et partagées par
+les routes via `app.state`. Les services acceptent des dépendances injectées, par exemple une
+horloge contrôlée ou un fournisseur simulé, pour tester les comportements sans appel externe.
+
+Le backend renvoie les notes des quatre activités dans chaque réponse. Le frontend peut donc
+changer d’activité et sélectionner le meilleur créneau sans redemander les données. Les pollens
+restent informatifs et ne participent à aucune note.
+
+### Fichiers de configuration et maintenance
+
+- `pyproject.toml` décrit le package, ses dépendances, la découverte des sources, Pytest et Ruff.
+- `.env.example` explique chaque groupe de variables ; `.env` contient la configuration locale
+  chargée par l’option `--env-file` d’Uvicorn et reste exclu de Git et de l’image Docker.
+- `compose.yaml` fournit Redis local avec son volume persistant ; le `Dockerfile` construit le
+  serveur API de production, exécuté avec un utilisateur dédié.
+- `.gitignore` et `.dockerignore` expliquent les fichiers locaux ou générés à exclure.
+- `scripts/release.py` vérifie la cohérence des versions et du changelog avant de préparer les
+  fichiers puis de créer le commit de release local. `--dry-run` conserve le choix interactif.
+- `CHANGELOG.md` conserve l’historique des versions ; `AGENTS.md` décrit les conventions du dépôt.
+
+### Organisation des tests
+
+Chaque fichier de test explique son périmètre et le comportement attendu des scénarios.
+
+| Suite | Vérifications principales |
+|---|---|
+| `test_scoring.py` | Courbes, frontières des catégories, arrondis, plafonds et données incomplètes. |
+| `test_open_meteo.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
+| `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
+| `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
+| `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota et propagation de Retry-After. |
+| `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
+| `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
+| `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
+| `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
+| `test_redis_integration.py` | Scripts atomiques, verrous et attente partagée sur un vrai Redis. |
 
 ## Créneaux et données utilisées
 

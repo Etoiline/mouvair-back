@@ -1,3 +1,10 @@
+"""Teste la frontière entre budget partagé, appels fournisseur et erreurs métier.
+
+Le quota simulé enregistre les coûts et les attentes. monkeypatch remplace les
+chargements de données ; MockTransport simule un vrai échange httpx pour vérifier
+la lecture de Retry-After sans contacter un service externe.
+"""
+
 import asyncio
 
 import httpx
@@ -14,21 +21,25 @@ from mouvair_api.rate_limit import RateLimitBackendUnavailable, RateLimitExceede
 
 
 class FakeQuota:
+    """Double enregistrant les réservations et les périodes de blocage demandées."""
     def __init__(self, error: Exception | None = None) -> None:
         self.costs: list[int] = []
         self.blocked: list[int] = []
         self.error = error
 
     async def reserve(self, cost: int) -> None:
+        """Mémorise le coût même si le scénario doit ensuite refuser cette réservation."""
         self.costs.append(cost)
         if self.error is not None:
             raise self.error
 
     async def block_for(self, seconds: int) -> None:
+        """Capture l’attente qui devrait être propagée aux autres instances."""
         self.blocked.append(seconds)
 
 
 def test_gateway_reserves_one_geocoding_call_and_two_forecast_calls(monkeypatch) -> None:
+    """Les opérations métier réservent respectivement un et deux appels avant leur exécution."""
     quota = FakeQuota()
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -59,6 +70,7 @@ def test_gateway_reserves_one_geocoding_call_and_two_forecast_calls(monkeypatch)
 def test_gateway_converts_quota_failures_without_calling_the_provider(
     monkeypatch, error: Exception
 ) -> None:
+    """Un refus ou une panne de quota doit remonter avant toute tentative d’appel fournisseur."""
     called = False
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -82,6 +94,7 @@ def test_gateway_converts_quota_failures_without_calling_the_provider(
 
 
 def test_provider_429_creates_a_shared_cooldown(monkeypatch) -> None:
+    """Une limitation fournisseur de 23 secondes devient une attente partagée et une erreur 503."""
     quota = FakeQuota()
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -102,6 +115,7 @@ def test_provider_429_creates_a_shared_cooldown(monkeypatch) -> None:
 
 
 def test_http_429_retry_after_is_preserved() -> None:
+    """Le délai annoncé par l’en-tête HTTP reste intact dans l’exception de bas niveau."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "37"}, request=request)
 

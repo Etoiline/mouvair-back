@@ -1,6 +1,10 @@
+# Redis local partagé par les caches, les verrous et les réservations de quota.
+# L’API démarre séparément avec Uvicorn ; Compose ne lance ici que son stockage.
 services:
   redis:
     image: redis:8.2-alpine
+    # AOF conserve les écritures ; everysec synchronise le journal chaque seconde.
+    # noeviction évite de supprimer silencieusement des compteurs de quota sous pression mémoire.
     command:
       - redis-server
       - --appendonly
@@ -9,15 +13,19 @@ services:
       - everysec
       - --maxmemory-policy
       - noeviction
+    # L’écoute publiée reste sur la boucle locale du poste de développement.
     ports:
       - "127.0.0.1:6379:6379"
+    # Le volume survit à un arrêt du service et conserve l’historique des quotas.
     volumes:
       - redis-data:/data
+    # Redis est considéré disponible lorsqu’il répond à PING, sans écrire de donnée métier.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+# Supprimer explicitement ce volume effacerait les caches et les compteurs persistants.
 volumes:
   redis-data:

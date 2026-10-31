@@ -1,3 +1,10 @@
+"""Teste la politique de prévision sans serveur Redis ni fournisseur externe.
+
+Une horloge mutable fait franchir les seuils de fraîcheur sans attente réelle.
+Des fetchers séquencés simulent succès et pannes ; un cache partagé minimal
+permet de distinguer les états locaux de deux instances de ForecastService.
+"""
+
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,18 +26,24 @@ from mouvair_api.scoring import calculate_score
 
 @dataclass
 class MutableClock:
+    """Horloge injectée que chaque scénario avance jusqu’à une frontière précise."""
     value: datetime
 
     def __call__(self) -> datetime:
+        """Expose l’instant courant au service avec la même interface que l’horloge réelle."""
         return self.value
 
 
 class SequencedFetcher:
+    """Fournisseur déterministe renvoyant successivement des prévisions ou des erreurs."""
+
     def __init__(self, *outcomes: ForecastResponse | OpenMeteoError) -> None:
+        """Conserve les issues et compte les vrais rafraîchissements demandés."""
         self.outcomes = outcomes
         self.calls = 0
 
     async def __call__(self, latitude: float, longitude: float) -> ForecastResponse:
+        """Consomme une issue par appel pour révéler un rafraîchissement superflu."""
         outcome = self.outcomes[self.calls]
         self.calls += 1
         if isinstance(outcome, OpenMeteoError):
@@ -39,6 +52,11 @@ class SequencedFetcher:
 
 
 class SharedForecastCache:
+    """Double de L2 suffisant pour vérifier le partage entre deux services.
+
+    Il conserve un seul résultat et un verrou simple, sans simuler les délais
+    Redis : les garanties atomiques réelles ont leur propre suite d’intégration.
+    """
     def __init__(self) -> None:
         self.forecast: ForecastResponse | None = None
         self.locked = False
@@ -73,6 +91,11 @@ def forecast_at(
     longitude: float = 4.85,
     timezone_name: str = "UTC",
 ) -> ForecastResponse:
+    """Construit 24 créneaux cohérents à la date donnée, avec leurs vraies notes.
+
+    Les mesures constantes isolent les tests de cache : seuls le temps, les
+    coordonnées, le fuseau et les résultats du fournisseur varient selon le test.
+    """
     timezone = ZoneInfo(timezone_name)
     first_start = _next_full_hour(retrieved_at, timezone)
     hours = []
@@ -116,6 +139,7 @@ def forecast_at(
 
 
 def test_complete_forecast_is_reused_through_fifteen_minutes() -> None:
+    """À exactement 15 minutes, une fenêtre couverte reste fraîche et garde generated_at."""
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(forecast_at(retrieved_at))
@@ -139,6 +163,7 @@ def test_complete_forecast_is_reused_through_fifteen_minutes() -> None:
 
 
 def test_cache_older_than_fifteen_minutes_is_refreshed() -> None:
+    """À 16 minutes, une nouvelle récupération remplace la date et les marqueurs du cache."""
     first_retrieval = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     second_retrieval = first_retrieval + timedelta(minutes=16)
     clock = MutableClock(first_retrieval)
@@ -162,6 +187,7 @@ def test_cache_older_than_fifteen_minutes_is_refreshed() -> None:
 
 
 def test_fractional_timezone_cache_reuses_the_local_hour_window() -> None:
+    """La vérification de couverture suit l’heure locale même avec un décalage de 30 minutes."""
     retrieved_at = datetime(2026, 9, 8, 13, 10, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(forecast_at(retrieved_at, timezone_name="Asia/Kolkata"))
@@ -180,6 +206,7 @@ def test_fractional_timezone_cache_reuses_the_local_hour_window() -> None:
 
 
 def test_failed_refresh_keeps_recent_slots_and_fills_the_missing_hour() -> None:
+    """Après le changement d’heure de départ, le repli conserve 24 places dont la fin inconnue."""
     retrieved_at = datetime(2026, 9, 8, 12, 50, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
@@ -218,6 +245,7 @@ def test_failed_refresh_applies_the_one_hour_threshold(
     expected_state: str,
     recommendation_available: bool,
 ) -> None:
+    """L’âge d’une heure autorise encore le meilleur créneau ; une seconde de plus le suspend."""
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
@@ -240,6 +268,7 @@ def test_failed_refresh_applies_the_one_hour_threshold(
 
 
 def test_provider_error_without_cached_data_is_propagated() -> None:
+    """Sans historique disponible, le service doit laisser la route présenter l’erreur."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     service = ForecastService(
         SequencedFetcher(OpenMeteoError("indisponible")),
@@ -251,12 +280,14 @@ def test_provider_error_without_cached_data_is_propagated() -> None:
 
 
 def test_simultaneous_requests_share_one_provider_call() -> None:
+    """Deux demandeurs en attente doivent partager un unique fetcher encore inachevé."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     started = asyncio.Event()
     release = asyncio.Event()
     calls = 0
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
+        """Maintient la récupération ouverte jusqu’à l’arrivée du second demandeur."""
         nonlocal calls
         calls += 1
         started.set()
@@ -269,6 +300,7 @@ def test_simultaneous_requests_share_one_provider_call() -> None:
         first = asyncio.create_task(service.get_forecast(45.75, 4.85))
         await started.wait()
         second = asyncio.create_task(service.get_forecast(45.75, 4.85))
+        # Cède un tour de boucle pour laisser la seconde requête rejoindre la tâche partagée.
         await asyncio.sleep(0)
         release.set()
         return await asyncio.gather(first, second)
@@ -280,6 +312,7 @@ def test_simultaneous_requests_share_one_provider_call() -> None:
 
 
 def test_cache_discards_the_least_recently_used_position() -> None:
+    """Relire la première position protège son entrée : c’est la deuxième qui doit sortir."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
@@ -299,6 +332,7 @@ def test_cache_discards_the_least_recently_used_position() -> None:
 
 
 def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
+    """Un L1 vide utilise le résultat L2 d’une autre instance sans nouvel appel fournisseur."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     shared = SharedForecastCache()
     calls = 0

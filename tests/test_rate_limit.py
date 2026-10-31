@@ -1,3 +1,10 @@
+"""Teste les réservations de quota et les politiques de repli sans Redis réel.
+
+Les petits budgets rendent visibles l’indivisibilité du débit, l’idempotence
+et la séparation par client. Chaque scénario s’exécute dans une seule boucle
+asyncio pour partager correctement les compteurs et leurs verrous locaux.
+"""
+
 import asyncio
 
 import pytest
@@ -15,6 +22,7 @@ from mouvair_api.redis_store import RedisStore
 
 
 def test_local_limiter_reserves_a_cost_atomically() -> None:
+    """Refuser deux unités quand il n’en reste qu’une doit laisser cette dernière disponible."""
     limiter = LocalSlidingWindowLimiter()
     windows = (RateWindow(60, 3),)
 
@@ -32,6 +40,7 @@ def test_local_limiter_reserves_a_cost_atomically() -> None:
 
 
 def test_local_limiter_reuses_an_idempotent_reservation() -> None:
+    """Répéter le même identifiant réussit sans débiter une deuxième fois le budget épuisé."""
     limiter = LocalSlidingWindowLimiter()
     windows = (RateWindow(60, 2),)
 
@@ -45,6 +54,7 @@ def test_local_limiter_reuses_an_idempotent_reservation() -> None:
 
 
 def test_global_quota_fails_closed_without_redis() -> None:
+    """La politique de production refuse de garantir un quota global avec un compteur local."""
     settings = Settings(redis_failure_mode="closed")
     quota = OpenMeteoQuota(RedisStore(settings), settings)
 
@@ -53,6 +63,7 @@ def test_global_quota_fails_closed_without_redis() -> None:
 
 
 def test_explicit_local_mode_keeps_a_single_process_budget() -> None:
+    """Le mode local autorisé garde néanmoins les limites configurées dans son processus."""
     settings = Settings(
         redis_failure_mode="local",
         open_meteo_quota_minute=2,
@@ -71,6 +82,7 @@ def test_explicit_local_mode_keeps_a_single_process_budget() -> None:
 
 
 def test_client_limiter_uses_a_local_fallback_when_redis_is_unavailable() -> None:
+    """Le repli limite client-a après deux requêtes tout en laissant client-b indépendant."""
     settings = Settings(
         location_rate_limit_minute=2,
         location_rate_limit_hour=2,

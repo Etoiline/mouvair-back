@@ -1,5 +1,7 @@
 # Changelog
 
+- Add detailed French comments across backend modules, tests, release tooling and configuration, and document the project structure and request flow in the README.
+
 ## 0.4.0 - 2026-09-13
 
 - Add a production Docker image and safely support Railway's trusted client IP header.
