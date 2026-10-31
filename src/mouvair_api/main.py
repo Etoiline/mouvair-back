@@ -77,14 +77,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Conditions horaires pour la course, le vélo et la marche.",
         lifespan=lifespan,
     )
-    # Les origines sont explicites pour autoriser les appels du frontend dans le navigateur.
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(resolved_settings.frontend_origins),
-        allow_credentials=False,
-        allow_methods=["GET"],
-        allow_headers=["*"],
-    )
 
     @application.middleware("http")
     async def apply_client_limit(request: Request, call_next):
@@ -108,6 +100,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     headers={"Retry-After": str(exc.retry_after)},
                 )
         return await call_next(request)
+
+    # Le dernier middleware ajouté s’exécute en premier : CORS doit envelopper
+    # le limiteur pour traiter aussi ses réponses 429, produites sans appeler la route.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(resolved_settings.frontend_origins),
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+        # Le navigateur peut lire le délai de reprise sur les réponses 429 et 503.
+        expose_headers=["Retry-After"],
+    )
 
     @application.get("/health")
     async def health(request: Request) -> dict[str, str]:

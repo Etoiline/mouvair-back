@@ -188,6 +188,13 @@ Une limite client renvoie `429` avec `Retry-After`. Lorsque le budget global ou 
 indisponibles, une donnée déjà en cache reste servie ; une opération nécessitant Open-Meteo renvoie
 `503` avec `Retry-After`. Une erreur ordinaire du fournisseur reste une réponse `502`.
 
+Le middleware CORS enveloppe la limitation client : les réponses `429` conservent les en-têtes
+d’autorisation pour les origines configurées dans `FRONTEND_ORIGINS`. Le frontend peut ainsi lire
+le message JSON plutôt que recevoir une erreur réseau liée à CORS. `Retry-After` est également
+exposé au JavaScript du navigateur sur les réponses `429` et `503`. Les prérequêtes `OPTIONS`
+ne consomment pas le budget client ; les origines absentes de la configuration ne reçoivent pas
+d’autorisation CORS.
+
 ## Redis et fonctionnement dégradé
 
 En production, `REDIS_FAILURE_MODE=closed` empêche tout nouvel appel fournisseur lorsque Redis est
