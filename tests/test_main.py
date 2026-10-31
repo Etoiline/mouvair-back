@@ -7,6 +7,7 @@ les configurations sans Redis exercent les modes local et closed.
 
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mouvair_api.config import Settings
@@ -70,20 +71,49 @@ def test_location_search_returns_a_quota_503_with_retry_after() -> None:
 
 
 def test_location_client_limit_returns_429_when_the_same_client_changes_city() -> None:
-    """Changer la ville recherchée ne réinitialise pas le budget du même client réseau."""
+    """Changer la ville conserve le budget ; le navigateur peut lire le refus et son délai."""
     settings = Settings(
         redis_failure_mode="local",
         location_rate_limit_minute=1,
         location_rate_limit_hour=1,
     )
     app = create_app(settings)
+    origin = {"Origin": "http://localhost:5173"}
     with TestClient(app) as client:
         app.state.geocoding_service = StubGeocoding()
-        first = client.get("/api/locations", params={"q": "Lyon"})
-        limited = client.get("/api/locations", params={"q": "Paris"})
+        first = client.get("/api/locations", params={"q": "Lyon"}, headers=origin)
+        limited = client.get("/api/locations", params={"q": "Paris"}, headers=origin)
 
     assert first.status_code == 200
     assert limited.status_code == 429
+    assert limited.headers["Access-Control-Allow-Origin"] == origin["Origin"]
+    assert "Retry-After" in limited.headers["Access-Control-Expose-Headers"]
+    assert int(limited.headers["Retry-After"]) > 0
+
+
+@pytest.mark.parametrize("endpoint", ["/api/locations", "/api/forecast"])
+@pytest.mark.parametrize("origin", [None, "https://untrusted.example"])
+def test_client_limit_does_not_grant_cors_to_an_unlisted_or_missing_origin(
+    endpoint: str,
+    origin: str | None,
+) -> None:
+    """Le traitement des 429 respecte la liste des origines autorisées sur les deux routes."""
+    settings = Settings(
+        redis_failure_mode="local",
+        location_rate_limit_minute=1,
+        location_rate_limit_hour=1,
+        forecast_rate_limit_minute=1,
+        forecast_rate_limit_hour=1,
+    )
+    headers = {"Origin": origin} if origin is not None else {}
+    with TestClient(create_app(settings)) as client:
+        # Les paramètres manquants consomment le budget sans appeler le fournisseur.
+        first = client.get(endpoint, headers=headers)
+        limited = client.get(endpoint, headers=headers)
+
+    assert first.status_code == 422
+    assert limited.status_code == 429
+    assert "Access-Control-Allow-Origin" not in limited.headers
     assert int(limited.headers["Retry-After"]) > 0
 
 

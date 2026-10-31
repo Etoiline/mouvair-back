@@ -1,5 +1,7 @@
 # Changelog
 
+- Apply CORS to client rate-limit responses and expose Retry-After so browsers can read 429 errors and retry delays.
+
 - Expand forecast API and Redis integration tests, fix concurrent refresh waiting, and add GitHub Actions checks with Redis.
 
 - Add a local Docker Compose API service with Redis readiness, environment configuration, health checks, and startup instructions.

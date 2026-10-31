@@ -251,11 +251,14 @@ def test_forecast_client_limit_applies_to_cache_hits_and_allows_cors_preflight(
             assert preflight.status_code == 200
             assert preflight.headers["Access-Control-Allow-Origin"] == origin["Origin"]
         first = client.get("/api/forecast", params=params, headers=origin)
-        limited = client.get("/api/forecast", params=params)
+        limited = client.get("/api/forecast", params=params, headers=origin)
 
     assert first.status_code == 200
     assert first.headers["Access-Control-Allow-Origin"] == origin["Origin"]
     assert limited.status_code == 429
+    assert limited.headers["Access-Control-Allow-Origin"] == origin["Origin"]
+    assert "Retry-After" in limited.headers["Access-Control-Expose-Headers"]
+    assert "Origin" in limited.headers["Vary"]
     assert int(limited.headers["Retry-After"]) > 0
     assert limited.json() == {"detail": "Trop de requêtes, veuillez réessayer plus tard"}
     assert forecast_fetcher.calls == 1
