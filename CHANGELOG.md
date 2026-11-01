@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.4.1 - 2026-11-01
+
 - Lock backend dependencies with uv, pin Python, build tools and Docker images, align local and CI installations, and synchronize the lockfile during releases.
 
 - Add structured JSON diagnostics with request correlation, timings, cache sources, fallback reasons, provider failures, quotas and Redis availability events.

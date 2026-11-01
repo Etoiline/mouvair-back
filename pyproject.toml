@@ -2,7 +2,7 @@
 # version avec mouvair_api.__version__, utilisée par les métadonnées HTTP de l’API.
 [project]
 name = "mouvair-back"
-version = "0.4.0"
+version = "0.4.1"
 description = "Indice horaire des conditions extérieures pour quatre activités sportives"
 requires-python = ">=3.12,<4.0"
 # Dépendances d’exécution épinglées. Les outils de test sont séparés dans l’extra dev.
