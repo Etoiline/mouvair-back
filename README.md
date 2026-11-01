@@ -415,13 +415,19 @@ explicitement vers sa base 15 pour activer les tests Redis en CI. Ce service est
 n’utilise ni le Redis de développement ni celui de production. La configuration suit le
 [fonctionnement des services Redis dans GitHub Actions](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-redis-service-containers).
 
-Les actions sont épinglées à leurs SHA de release. Le workflow possède uniquement le droit de
-lecture du dépôt ; il ne déploie pas l’application. Sa première exécution sur GitHub aura lieu
-après publication de la branche contenant ce fichier.
+Après les tests, le workflow construit aussi l’image Docker de production pour vérifier son
+installation depuis le verrou. Les actions sont épinglées à leurs SHA de release. Le workflow
+possède uniquement le droit de lecture du dépôt ; il ne déploie pas l’application.
 
 ## Déploiement sur Railway
 
-Le `Dockerfile` lance l’API sur le port injecté par Railway. Pour déployer la production :
+Le `Dockerfile` lance l’API sur le port injecté par Railway.
+
+Le binaire uv est copié depuis son image épinglée avec `COPY --from`, puis retiré après
+l’installation. Cette construction évite le montage du binaire dans `RUN --mount`, refusé par le
+builder Railway utilisé pour ce projet, qui accepte uniquement les montages `type=cache`.
+
+Pour déployer la production :
 
 1. créer un projet Railway et y ajouter un service Redis privé avec un volume monté sur `/data` ;
 2. activer l’AOF avec `appendfsync everysec` et la politique `noeviction` sur ce service ;

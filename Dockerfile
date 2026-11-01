@@ -13,14 +13,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Les chemins de construction et d’exécution restent indépendants du poste hôte.
 WORKDIR /app
 
+# Railway accepte cette copie entre étapes, contrairement au montage du binaire dans RUN.
+COPY --from=uv /uv /usr/local/bin/uv
+
 # Le package et ses métadonnées suffisent ; tests, .env et environnement local sont exclus.
 COPY pyproject.toml uv.lock .python-version README.md ./
 COPY src ./src
 
-# --locked refuse un verrou périmé ; aucun outil de test ni binaire uv ne reste dans l’image.
+# --locked refuse un verrou périmé ; uv est retiré après l’installation sans outils de test.
 # L’installation non éditable et son environnement isolé servent aussi à l’exécution.
-RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    uv sync --locked --no-dev --no-editable --no-cache \
+RUN uv sync --locked --no-dev --no-editable --no-cache \
+    && rm /usr/local/bin/uv \
     && useradd --create-home --uid 10001 mouvair
 
 # Le serveur utilise cet utilisateur même si la construction s’est faite comme root.
