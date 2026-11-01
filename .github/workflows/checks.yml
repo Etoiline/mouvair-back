@@ -63,3 +63,7 @@ jobs:
 
       - name: Run all tests including Redis integration
         run: uv run --locked --extra dev pytest --strict-markers -ra
+
+      # Les tests Python seuls ne vérifient pas l’installation de l’image de production.
+      - name: Build production Docker image
+        run: docker build --tag mouvair-back:ci .
