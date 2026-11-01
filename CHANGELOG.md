@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix Railway Docker builds by copying uv from its pinned image instead of using an unsupported bind mount, and build the production image in CI.
+
 ## 0.4.1 - 2026-11-01
 
 - Lock backend dependencies with uv, pin Python, build tools and Docker images, align local and CI installations, and synchronize the lockfile during releases.
