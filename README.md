@@ -8,10 +8,104 @@ Pour chaque activité et chaque créneau, le moteur sépare désormais :
 - `air` : note air, indice européen AQI, catégorie et recommandations générales ;
 - `overall` : note globale combinant météo et air selon l’activité.
 
-Une note impossible à calculer vaut `null` et porte le statut `incomplet`. Une note disponible est
-arrondie à l’entier pour l’affichage, après conservation des décimales pendant tous les calculs.
-Le contrat `SportScore` expose uniquement ces trois sections afin de conserver une source claire
-pour chaque note, ses facteurs et ses explications.
+Une note impossible à calculer vaut `null` ; les sections `weather` et `overall` portent alors le
+statut `incomplet`. Une note disponible est arrondie à l’entier pour l’affichage, après conservation
+des décimales pendant tous les calculs. Le contrat `SportScore` contient les métadonnées `sport` et
+`label`, puis ces trois sections pour chaque note, ses facteurs et ses explications.
+
+## Organisation et lecture du code
+
+Le package Python se trouve dans `src/mouvair_api`. Ses modules sont commentés en français :
+les docstrings expliquent les contrats et les commentaires détaillent les choix de traitement,
+notamment les plafonds, les bornes temporelles et la coordination entre requêtes.
+
+| Module | Responsabilité |
+|---|---|
+| `__init__.py` | Version du package, synchronisée par le script de release. |
+| `main.py` | Construction de FastAPI, cycle de vie des connexions, CORS, routes et erreurs HTTP. |
+| `diagnostics.py` | Événements JSON, contexte de requête et mesure du traitement HTTP. |
+| `config.py` | Configuration immuable, lecture de l’environnement et validation des limites. |
+| `models.py` | Contrat Pydantic des villes, mesures, pollens, scores et prévisions. |
+| `open_meteo.py` | Appels HTTP fournisseur, géocodage, paramètres, erreurs réseau et quota. |
+| `forecast_slots.py` | Assemblage pur des séries, mesures, pollens, créneaux et horaires locaux. |
+| `errors.py` | Erreur de disponibilité commune aux services et aux adaptateurs de données. |
+| `scoring.py` | Profils sportifs, courbes, notes précises, plafonds, arrondis et explications. |
+| `forecast_service.py` | Cache mémoire L1, fraîcheur, fenêtre de 24 départs et réponse de secours. |
+| `forecast_cache.py` | Sérialisation des prévisions dans le L2 Redis et verrou distribué. |
+| `geocoding_service.py` | Normalisation des recherches, caches positif et négatif, mutualisation. |
+| `rate_limit.py` | Fenêtres glissantes, réservations atomiques, attente fournisseur et limites client. |
+| `client_identity.py` | Adresse réseau fiable derrière les proxies puis identifiant HMAC. |
+| `redis_store.py` | Connexions, commandes, verrous à jeton et délai de repli après une panne Redis. |
+
+Pour suivre une requête de prévision, commencer par `main.py`, puis `ForecastService.get_forecast`,
+`OpenMeteoGateway.get_forecast`, l’assemblage des créneaux dans `forecast_slots.py` et enfin le moteur
+`scoring.py`. `models.py` décrit les objets échangés tout au long de ce parcours.
+
+`forecast_slots.py` ne réalise aucun accès HTTP ou Redis. Son interface publique expose
+`assemble_forecast` pour construire la réponse à partir des séries déjà récupérées et
+`next_full_hour` pour calculer les départs locaux. Le service de prévision utilise directement
+cette règle horaire commune, sans importer de fonction privée du transport Open-Meteo.
+
+Les erreurs attendues dérivent de `DataUnavailableError`, défini dans `errors.py`. L’adaptateur
+conserve ses exceptions spécialisées pour les erreurs HTTP et les quotas. Les services déclenchent
+leur repli sur le contrat commun ; les routes distinguent toujours les limitations `503` des
+autres indisponibilités `502`.
+
+Les ressources réseau sont créées au démarrage dans le gestionnaire `lifespan` et partagées par
+les routes via `app.state`. Les services acceptent des dépendances injectées, par exemple une
+horloge contrôlée ou un fournisseur simulé, pour tester les comportements sans appel externe.
+
+Le backend renvoie les notes des quatre activités dans chaque réponse. Le frontend peut donc
+changer d’activité et sélectionner le meilleur créneau sans redemander les données. Les pollens
+restent informatifs et ne participent à aucune note.
+
+### Fichiers de configuration et maintenance
+
+- `pyproject.toml` décrit le package, ses dépendances, la découverte des sources, Pytest et Ruff.
+- `uv.lock` fixe les dépendances directes et indirectes, les outils de développement et les
+  empreintes des archives pour Windows et Linux. Il est généré par uv et versionné avec le projet.
+- `.python-version` fixe Python 3.12.16 pour le développement et la CI ; le `Dockerfile`
+  utilise cette même version et des images identifiées par leur empreinte.
+- `.env.example` explique chaque groupe de variables ; `.env` contient la configuration locale
+  chargée par l’option `--env-file` d’Uvicorn et reste exclu de Git et de l’image Docker.
+- `compose.yaml` démarre l’API et Redis local avec son volume persistant ; le `Dockerfile`
+  construit le serveur API, exécuté avec un utilisateur dédié.
+- `.gitignore` et `.dockerignore` expliquent les fichiers locaux ou générés à exclure.
+- `.github/workflows/checks.yml` exécute Ruff et les tests avec Redis sur GitHub Actions.
+- `scripts/release.py` vérifie la cohérence des versions et du changelog avant de préparer les
+  fichiers puis de créer le commit de release local. `--dry-run` conserve le choix interactif.
+- `CHANGELOG.md` conserve l’historique des versions ; `AGENTS.md` décrit les conventions du dépôt.
+
+### Organisation des tests
+
+Chaque fichier de test explique son périmètre et le comportement attendu des scénarios.
+
+| Suite | Vérifications principales |
+|---|---|
+| `test_scoring.py` | Courbes, frontières des catégories, arrondis, plafonds et données incomplètes. |
+| `test_open_meteo.py` | Paramètres HTTP et passage des réponses météo et air à l’assemblage. |
+| `test_forecast_slots.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
+| `test_forecast_service.py` | Fraîcheur, repli, LRU, requêtes concurrentes et partage entre instances. |
+| `test_forecast_cache.py` | Identité, clés v1/v2, JSON, fuseaux, dates, créneaux et attente bornée. |
+| `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
+| `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota et propagation de Retry-After. |
+| `test_rate_limit.py` | Réservations locales indivisibles, idempotence et politiques de repli. |
+| `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
+| `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
+| `test_release.py` | Mise à jour hors ligne du verrou et restauration des fichiers si elle échoue. |
+| `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
+| `test_diagnostics.py` | Journaux JSON, durées, sources, replis et contexte concurrent des requêtes. |
+| `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
+| `test_redis_integration.py` | Atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
+
+`conftest.py` fournit un stockage mémoire indexé par clé pour exercer le véritable
+`RedisForecastCache` dans les tests unitaires. Le partage entre deux services est vérifié avec
+des coordonnées fournisseur identiques ou différentes de celles de la demande.
+`forecast_payloads.py` fournit les séries simulées communes aux tests d’assemblage et d’adaptation
+HTTP. `forecast_fixtures.py` partage l’horloge contrôlée et le fournisseur séquencé entre les
+scénarios HTTP et de service. Les tests HTTP conservent le middleware, la sérialisation FastAPI,
+le vrai service de prévision et l’adaptateur de cache ; les données fournisseur sont simulées.
+Les tests ne consomment donc aucun quota Open-Meteo.
 
 ## Créneaux et données utilisées
 
@@ -39,6 +133,33 @@ les 24 créneaux demandés. Chaque processus garde un cache mémoire L1 de 256 p
 de cache L2 partagé entre les workers et les instances. Une réponse mise en cache garde son heure
 réelle de récupération dans `generated_at`. Un verrou Redis empêche plusieurs instances de
 rafraîchir simultanément la même position.
+
+Lorsqu’une autre instance rafraîchit déjà la position, l’attente ignore la génération connue,
+identifiée par son `generated_at`. L’ancienne entrée peut rester présente dans Redis pendant le
+chargement : elle ne doit pas être confondue avec le nouveau résultat. Si aucune nouvelle
+génération n’arrive avant le délai configuré, le service utilise son repli habituel ou signale
+l’indisponibilité lorsqu’il ne possède aucun historique.
+
+À chaque lecture du L2, le JSON doit respecter le modèle de prévision et ses métadonnées
+temporelles doivent être utilisables : le fuseau doit être reconnu, `generated_at`, `time` et
+`end_time` doivent être des dates ISO avec décalage UTC, et chaque créneau doit durer une heure
+réelle. La comparaison en UTC conserve les créneaux valides lors des changements d’heure.
+Les chaînes et leurs décalages restent inchangés dans la réponse publique.
+
+Une entrée invalide est supprimée puis traitée comme une absence de cache : le service tente
+une récupération fournisseur, ou utilise un historique local valide si son repli est nécessaire.
+Une date invalide n’est donc pas remplacée par l’heure courante pour lui attribuer une fausse
+fraîcheur. Les mesures absentes et les notes `null` restent autorisées ; l’âge des données est
+toujours évalué séparément par le service de prévision.
+
+Les coordonnées exactes de la demande, sans arrondi supplémentaire, identifient le cache mémoire,
+les entrées Redis et leurs verrous. Elles sont transmises explicitement à l’écriture du L2.
+Les coordonnées renvoyées par le fournisseur restent dans le contenu de la réponse, même si elles
+diffèrent de la position demandée ; elles ne servent pas à construire la clé de stockage.
+
+Les clés de prévision et de verrou utilisent l’espace `v2`. Les anciennes entrées `v1`, dont la
+clé d’écriture dépendait des coordonnées fournisseur, restent isolées et expirent naturellement
+selon leur TTL. Les clés de géocodage et les compteurs de quota gardent leur espace existant.
 
 La recherche de ville ne contacte Open-Meteo qu’à partir de trois caractères normalisés. Les
 résultats de géocodage sont conservés 24 heures dans Redis et dans un petit cache mémoire local. Une
@@ -86,6 +207,13 @@ Une limite client renvoie `429` avec `Retry-After`. Lorsque le budget global ou 
 indisponibles, une donnée déjà en cache reste servie ; une opération nécessitant Open-Meteo renvoie
 `503` avec `Retry-After`. Une erreur ordinaire du fournisseur reste une réponse `502`.
 
+Le middleware CORS enveloppe la limitation client : les réponses `429` conservent les en-têtes
+d’autorisation pour les origines configurées dans `FRONTEND_ORIGINS`. Le frontend peut ainsi lire
+le message JSON plutôt que recevoir une erreur réseau liée à CORS. `Retry-After` est également
+exposé au JavaScript du navigateur sur les réponses `429` et `503`. Les prérequêtes `OPTIONS`
+ne consomment pas le budget client ; les origines absentes de la configuration ne reçoivent pas
+d’autorisation CORS.
+
 ## Redis et fonctionnement dégradé
 
 En production, `REDIS_FAILURE_MODE=closed` empêche tout nouvel appel fournisseur lorsque Redis est
@@ -103,14 +231,148 @@ Une production doit employer des garanties de persistance équivalentes, supervi
 utiliser Redis 7.2 ou ultérieur comme stockage faisant autorité plutôt qu’une réplication à
 cohérence éventuelle.
 
+## Journaux de diagnostic
+
+Les événements applicatifs sont écrits en JSON sur la sortie d’erreur, à raison d’une ligne par
+événement, et sont accessibles avec `docker compose logs -f api`. Leur configuration est activée
+au démarrage de FastAPI, une seule fois par processus, avec le niveau `INFO` par défaut.
+Un gestionnaire ou un niveau déjà défini sur le logger Python `mouvair_api` est conservé.
+
+Chaque requête HTTP reçoit un `request_id` interne. Les événements des services et des tâches
+asynchrones qu’elle déclenche conservent cet identifiant ; deux requêtes concurrentes ont des
+identifiants distincts. Hors d’une requête HTTP, par exemple pendant la connexion initiale à Redis,
+`request_id` vaut `null`. Aucun champ n’est ajouté au contrat JSON des prévisions.
+
+| Événement | Informations utiles |
+|---|---|
+| `http.request` | Méthode, chemin, statut, durée totale en millisecondes et issue du traitement. |
+| `http.client_limited` | Route concernée et délai `retry_after` d’un refus client 429. |
+| `forecast.cache_hit` | Source `memory` ou `redis`, état de fraîcheur et `age_seconds`. |
+| `forecast.refreshed` | Source `provider`, durée du chargement et âge réel des données reçues. |
+| `forecast.refresh_failed` | Type d’erreur, cause technique, délai éventuel et présence d’un historique. |
+| `forecast.fallback` | Motif du repli, âge, état `refresh_failed` ou `stale`, recommandation disponible. |
+| `forecast.shared_wait` | Durée et issue de l’attente d’une autre instance. |
+| `forecast.coalesced`, `geocoding.coalesced` | Une requête rejoint une tâche locale déjà en cours. |
+| `geocoding.cache_hit`, `geocoding.fetched` | Source, nombre de résultats et durée du chargement fournisseur. |
+| `geocoding.fetch_failed`, `geocoding.shared_wait` | Échec fournisseur ou attente d’une autre instance. |
+| `provider.request_failed` | Opération météo, air ou villes, cause réseau/HTTP/JSON et statut fournisseur. |
+| `provider.quota_rejected`, `provider.rate_limited` | Refus de budget ou limitation fournisseur, coût et délai. |
+| `forecast.cache_invalid`, `geocoding.cache_invalid` | Entrée L2 invalide et type d’erreur détecté. |
+| `redis.unavailable`, `redis.restored` | Transitions de disponibilité, sans répéter chaque tentative refusée. |
+
+Les replis portent `source: "cache"`, car ils réutilisent un historique déjà connu. Leur motif
+est `provider_error`, `shared_refresh_timeout`, `redis_unavailable` ou `shared_result_not_fresh`.
+Un HTTP 200 accompagné d’un événement `forecast.fallback` correspond donc à des données conservées
+après un échec, avec leur âge réel, plutôt qu’à une nouvelle récupération réussie.
+
+Les événements HTTP ne recopient que le chemin, sans paramètres. Les événements métier ne
+recopient ni ville saisie, ni coordonnées, ni contenu fournisseur. Les échecs décrivent les types
+d’exception et leurs causes sans journaliser leurs messages bruts. Le `Dockerfile` et la commande
+Uvicorn ci-dessous utilisent `--no-access-log` pour laisser ces événements assurer le suivi HTTP.
+
+Les refus HTTP attendus, les replis et les entrées invalides utilisent `WARNING` ; une exception
+HTTP non gérée utilise `ERROR`. Les requêtes `/health`, les prérequêtes CORS réussies et le détail
+des appels fournisseur réussis sont en `DEBUG` pour conserver des journaux courants lisibles.
+L’hébergeur peut activer ce niveau sur le logger `mouvair_api` pour une investigation détaillée.
+
 ## Commandes
 
+### API et Redis avec Docker
+
+Pour tester le backend localement sans installer Python sur le poste :
+
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-Copy-Item .env.example .env
+cd E:\projects\mouvair\mouvair-back
+docker compose up -d --build --wait
+docker compose ps
+```
+
+Compose construit l’image de l’API, attend que Redis soit disponible, puis vérifie que l’API
+répond avec un état `ok` et une connexion Redis `ok`. Les deux services doivent apparaître
+avec l’état `healthy` dans Docker. L’API est accessible sur `http://localhost:8000`, sa
+documentation sur `http://localhost:8000/docs` et son diagnostic sur `http://localhost:8000/health`.
+Les images Python, uv et Redis sont figées par empreinte ; Compose et la CI partagent la même
+image Redis 8.2.9. Leurs mises à jour passent par une modification explicite de ces références.
+
+Le fichier `.env` est facultatif dans ce mode. S’il existe, ses valeurs sont transmises au
+conteneur ; Compose fixe le port interne à `8000`, l’adresse Redis à `redis://redis:6379/0`
+et le mode de panne à `closed`. Les ports publiés restent limités au poste local.
+
+Pour utiliser l’interface, lancer le frontend dans un autre terminal :
+
+```powershell
+cd E:\projects\mouvair\mouvair-front
+pnpm install
+pnpm dev
+```
+
+Le site est disponible sur `http://localhost:5173` et utilise l’API locale par défaut.
+Après une modification du backend, relancer `docker compose up -d --build --wait` pour
+reconstruire son image. Pour consulter ses journaux :
+
+```powershell
+docker compose logs -f api
+```
+
+Pour arrêter l’environnement en conservant les données Redis :
+
+```powershell
+docker compose stop
+```
+
+### Installation reproductible sur le poste hôte
+
+Installer une fois **uv 0.13.6**, avec un Python déjà disponible sur le poste :
+
+```powershell
+python -m pip install --user "uv==0.13.6"
+uv --version
+```
+
+La commande `uv` doit être accessible dans le `PATH` du terminal. Les autres méthodes
+d’installation figurent dans la [documentation officielle de uv](https://docs.astral.sh/uv/getting-started/installation/).
+Depuis la racine du backend, installer ensuite l’environnement de développement :
+
+```powershell
+uv sync --locked --extra dev
+```
+
+Cette commande crée ou synchronise `.venv`, installe Python 3.12.16 si nécessaire et sélectionne
+les versions exactes de `uv.lock`, avec leurs empreintes. Le verrou contient aussi les conditions
+propres à chaque plateforme : `uvloop`, par exemple, est installé sur Linux et pas sur Windows.
+Les dépendances applicables aux deux systèmes conservent les mêmes versions.
+
+`--locked` fait échouer l’installation si `pyproject.toml` et `uv.lock` ne correspondent plus,
+sans modifier le verrou. Répéter la commande conserve les versions résolues ; les paquets
+étrangers à cet environnement sont retirés. Docker utilise le même verrou, avec seulement les
+dépendances d’exécution, tandis que le poste de développement et la CI ajoutent l’extra `dev`.
+La version de uv et celle du constructeur Setuptools sont également épinglées dans le projet.
+
+Après une modification volontaire des dépendances dans `pyproject.toml` :
+
+```powershell
+uv lock
+uv sync --locked --extra dev
+uv run --locked --extra dev ruff check .
+uv run --locked --extra dev pytest
+```
+
+Versionner `pyproject.toml` et `uv.lock` ensemble après vérification. Pour actualiser une dépendance
+indirecte précise, utiliser par exemple `uv lock --upgrade-package starlette` ; `uv lock --upgrade`
+réévalue toutes les versions autorisées. Ne pas modifier `uv.lock` à la main. Les mises à jour de
+Python doivent rester alignées entre `.python-version` et l’image du `Dockerfile`, empreinte comprise.
+Une mise à jour de uv doit aligner `pyproject.toml`, le `Dockerfile`, la CI et cette procédure.
+
+### Développement avec Uvicorn sur le poste hôte
+
+Ce mode facilite le rechargement automatique du code. Si l’API Docker est déjà lancée,
+arrêter son service avec `docker compose stop api` pour libérer le port `8000`.
+
+```powershell
+uv sync --locked --extra dev
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d redis
-.\.venv\Scripts\python.exe -m uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env
+uv run --locked --extra dev uvicorn mouvair_api.main:app --app-dir src --reload --env-file .env --no-access-log
 ```
 
 Remplacer `CLIENT_ID_HMAC_SECRET` dans `.env` par une valeur aléatoire longue avant d’exposer
@@ -123,16 +385,39 @@ Tests complets avec une instance Redis locale :
 docker compose up -d redis
 docker compose exec -T redis redis-cli ping
 $env:TEST_REDIS_URL="redis://127.0.0.1:6379/15"
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m ruff check .
+uv run --locked --extra dev pytest
+uv run --locked --extra dev ruff check .
 Remove-Item Env:TEST_REDIS_URL
 docker compose stop redis
 ```
 
 La commande `ping` doit répondre `PONG`. Les tests marqués `redis_integration` utilisent la base 15,
-nettoient leurs clés et vérifient les réservations concurrentes, les verrous, le délai partagé et
-`/health`. `docker compose stop redis` arrête le service sans supprimer le volume persistant, tandis
-que `docker compose down -v` supprimerait aussi les données Redis locales.
+nettoient uniquement leurs propres clés et vérifient les réservations concurrentes, les verrous,
+le délai partagé, `/health`, l’expiration réelle du cache, son rétablissement après corruption et
+le partage d’un rafraîchissement entre deux connexions. Ils couvrent aussi le cas où une ancienne
+prévision reste présente pendant le chargement de la suivante.
+
+Sans `TEST_REDIS_URL`, ces tests d’intégration sont ignorés ; les autres tests restent exécutables
+sans Redis. Lorsque la variable est définie, une connexion Redis impossible fait échouer les
+tests concernés. `docker compose stop redis` arrête le service sans supprimer le volume persistant,
+tandis que `docker compose down -v` supprimerait aussi les données Redis locales.
+
+### Vérifications automatiques sur GitHub
+
+Le workflow `.github/workflows/checks.yml` démarre à chaque push et pull request ; il peut aussi
+être déclenché manuellement depuis l’onglet Actions. Il lit Python dans `.python-version`, installe
+uv 0.13.6 puis synchronise le package et son extra `dev` avec `uv sync --locked --extra dev`.
+Un verrou absent ou périmé fait échouer le job avant Ruff et la suite Pytest. Le cache uv dépend
+du contenu de `uv.lock` et n’autorise pas la résolution silencieuse de nouvelles versions.
+
+Un conteneur Redis 8.2.9 dédié au job est attendu jusqu’à son état sain. `TEST_REDIS_URL` pointe
+explicitement vers sa base 15 pour activer les tests Redis en CI. Ce service est éphémère et
+n’utilise ni le Redis de développement ni celui de production. La configuration suit le
+[fonctionnement des services Redis dans GitHub Actions](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-redis-service-containers).
+
+Les actions sont épinglées à leurs SHA de release. Le workflow possède uniquement le droit de
+lecture du dépôt ; il ne déploie pas l’application. Sa première exécution sur GitHub aura lieu
+après publication de la branche contenant ce fichier.
 
 ## Déploiement sur Railway
 
@@ -162,17 +447,19 @@ Les réseaux de confiance ci-dessus sont réservés au déploiement Railway, don
 
 Le dépôt doit être propre et `CHANGELOG.md` doit contenir au moins une ligne de changement non
 publiée sous son titre. Le script demande s’il faut incrémenter la version majeure, mineure ou
-corrective, synchronise `pyproject.toml`, la version exposée par l’API et le changelog, puis crée le
-commit `🔖 Release x.y.z` :
+corrective, synchronise `pyproject.toml`, la version exposée par l’API, `uv.lock` et le changelog,
+puis crée le commit `🔖 Release x.y.z`. Le verrou est vérifié avant toute écriture et actualisé
+hors ligne sans mettre à jour les dépendances. Si cette préparation échoue, les quatre fichiers
+retrouvent leur contenu d’origine avant tout staging :
 
 ```powershell
-python scripts/release.py
+uv run --locked --extra dev python scripts/release.py
 ```
 
 Pour prévisualiser la prochaine version sans modifier le dépôt ni créer de commit :
 
 ```powershell
-python scripts/release.py --dry-run
+uv run --locked --extra dev python scripts/release.py --dry-run
 ```
 
 ## Endpoints

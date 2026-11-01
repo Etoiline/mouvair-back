@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1 - 2026-11-01
+
+- Lock backend dependencies with uv, pin Python, build tools and Docker images, align local and CI installations, and synchronize the lockfile during releases.
+
+- Add structured JSON diagnostics with request correlation, timings, cache sources, fallback reasons, provider failures, quotas and Redis availability events.
+
+- Validate cached forecast timezones, offset-aware timestamps and one-hour slots, discard invalid entries, and preserve valid fallback data.
+
+- Apply CORS to client rate-limit responses and expose Retry-After so browsers can read 429 errors and retry delays.
+
+- Expand forecast API and Redis integration tests, fix concurrent refresh waiting, and add GitHub Actions checks with Redis.
+
+- Add a local Docker Compose API service with Redis readiness, environment configuration, health checks, and startup instructions.
+
+- Align weather explanation intensity with the displayed weather and overall ratings.
+
+- Separate forecast assembly and time rules from Open-Meteo transport, introduce shared data errors, and reorganize tests by responsibility.
+
+- Fix shared forecast cache identity to use requested coordinates, preserve provider metadata, and isolate legacy entries and locks in a v2 namespace, with regression and Redis integration coverage.
+
+- Add detailed French comments across backend modules, tests, release tooling and configuration, and document the project structure and request flow in the README.
+
 ## 0.4.0 - 2026-09-13
 
 - Add a production Docker image and safely support Railway's trusted client IP header.

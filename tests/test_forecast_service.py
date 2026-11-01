@@ -1,11 +1,23 @@
+"""Teste la politique de prévision sans serveur Redis ni fournisseur externe.
+
+Une horloge mutable fait franchir les seuils de fraîcheur sans attente réelle.
+Des fetchers séquencés simulent succès et pannes ; le véritable cache L2 utilise
+un stockage mémoire partagé pour vérifier les échanges entre deux instances.
+"""
+
 import asyncio
-from dataclasses import dataclass
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from forecast_fixtures import MutableClock, SequencedFetcher
+from mouvair_api.config import Settings
+from mouvair_api.errors import DataUnavailableError
+from mouvair_api.forecast_cache import RedisForecastCache
 from mouvair_api.forecast_service import ForecastService
+from mouvair_api.forecast_slots import SLOT_COUNT, SPORTS, next_full_hour
 from mouvair_api.models import (
     Conditions,
     ForecastResponse,
@@ -13,57 +25,8 @@ from mouvair_api.models import (
     PollenForecast,
     SlotConditions,
 )
-from mouvair_api.open_meteo import SLOT_COUNT, SPORTS, OpenMeteoError, _next_full_hour
+from mouvair_api.redis_store import RedisStore
 from mouvair_api.scoring import calculate_score
-
-
-@dataclass
-class MutableClock:
-    value: datetime
-
-    def __call__(self) -> datetime:
-        return self.value
-
-
-class SequencedFetcher:
-    def __init__(self, *outcomes: ForecastResponse | OpenMeteoError) -> None:
-        self.outcomes = outcomes
-        self.calls = 0
-
-    async def __call__(self, latitude: float, longitude: float) -> ForecastResponse:
-        outcome = self.outcomes[self.calls]
-        self.calls += 1
-        if isinstance(outcome, OpenMeteoError):
-            raise outcome
-        return outcome
-
-
-class SharedForecastCache:
-    def __init__(self) -> None:
-        self.forecast: ForecastResponse | None = None
-        self.locked = False
-
-    async def get(self, latitude: float, longitude: float) -> ForecastResponse | None:
-        del latitude, longitude
-        return self.forecast
-
-    async def set(self, forecast: ForecastResponse) -> None:
-        self.forecast = forecast
-
-    async def acquire_lock(self, latitude: float, longitude: float) -> str | None:
-        del latitude, longitude
-        if self.locked:
-            return None
-        self.locked = True
-        return "token"
-
-    async def release_lock(self, latitude: float, longitude: float, token: str) -> None:
-        del latitude, longitude, token
-        self.locked = False
-
-    async def wait(self, latitude: float, longitude: float) -> ForecastResponse | None:
-        del latitude, longitude
-        return self.forecast
 
 
 def forecast_at(
@@ -73,8 +36,13 @@ def forecast_at(
     longitude: float = 4.85,
     timezone_name: str = "UTC",
 ) -> ForecastResponse:
+    """Construit 24 créneaux cohérents à la date donnée, avec leurs vraies notes.
+
+    Les mesures constantes isolent les tests de cache : seuls le temps, les
+    coordonnées, le fuseau et les résultats du fournisseur varient selon le test.
+    """
     timezone = ZoneInfo(timezone_name)
-    first_start = _next_full_hour(retrieved_at, timezone)
+    first_start = next_full_hour(retrieved_at, timezone)
     hours = []
     for offset in range(SLOT_COUNT):
         start = first_start + timedelta(hours=offset)
@@ -116,6 +84,7 @@ def forecast_at(
 
 
 def test_complete_forecast_is_reused_through_fifteen_minutes() -> None:
+    """À exactement 15 minutes, une fenêtre couverte reste fraîche et garde generated_at."""
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(forecast_at(retrieved_at))
@@ -139,6 +108,7 @@ def test_complete_forecast_is_reused_through_fifteen_minutes() -> None:
 
 
 def test_cache_older_than_fifteen_minutes_is_refreshed() -> None:
+    """À 16 minutes, une nouvelle récupération remplace la date et les marqueurs du cache."""
     first_retrieval = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     second_retrieval = first_retrieval + timedelta(minutes=16)
     clock = MutableClock(first_retrieval)
@@ -162,6 +132,7 @@ def test_cache_older_than_fifteen_minutes_is_refreshed() -> None:
 
 
 def test_fractional_timezone_cache_reuses_the_local_hour_window() -> None:
+    """La vérification de couverture suit l’heure locale même avec un décalage de 30 minutes."""
     retrieved_at = datetime(2026, 9, 8, 13, 10, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(forecast_at(retrieved_at, timezone_name="Asia/Kolkata"))
@@ -180,11 +151,12 @@ def test_fractional_timezone_cache_reuses_the_local_hour_window() -> None:
 
 
 def test_failed_refresh_keeps_recent_slots_and_fills_the_missing_hour() -> None:
+    """Après le changement d’heure de départ, le repli conserve 24 places dont la fin inconnue."""
     retrieved_at = datetime(2026, 9, 8, 12, 50, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
         forecast_at(retrieved_at),
-        OpenMeteoError("indisponible"),
+        DataUnavailableError("indisponible"),
     )
     service = ForecastService(fetcher, clock=clock)
 
@@ -218,11 +190,12 @@ def test_failed_refresh_applies_the_one_hour_threshold(
     expected_state: str,
     recommendation_available: bool,
 ) -> None:
+    """L’âge d’une heure autorise encore le meilleur créneau ; une seconde de plus le suspend."""
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     clock = MutableClock(retrieved_at)
     fetcher = SequencedFetcher(
         forecast_at(retrieved_at),
-        OpenMeteoError("indisponible"),
+        DataUnavailableError("indisponible"),
     )
     service = ForecastService(fetcher, clock=clock)
 
@@ -240,23 +213,26 @@ def test_failed_refresh_applies_the_one_hour_threshold(
 
 
 def test_provider_error_without_cached_data_is_propagated() -> None:
+    """Sans historique disponible, le service doit laisser la route présenter l’erreur."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     service = ForecastService(
-        SequencedFetcher(OpenMeteoError("indisponible")),
+        SequencedFetcher(DataUnavailableError("indisponible")),
         clock=MutableClock(moment),
     )
 
-    with pytest.raises(OpenMeteoError, match="indisponible"):
+    with pytest.raises(DataUnavailableError, match="indisponible"):
         asyncio.run(service.get_forecast(45.75, 4.85))
 
 
 def test_simultaneous_requests_share_one_provider_call() -> None:
+    """Deux demandeurs en attente doivent partager un unique fetcher encore inachevé."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     started = asyncio.Event()
     release = asyncio.Event()
     calls = 0
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
+        """Maintient la récupération ouverte jusqu’à l’arrivée du second demandeur."""
         nonlocal calls
         calls += 1
         started.set()
@@ -269,6 +245,7 @@ def test_simultaneous_requests_share_one_provider_call() -> None:
         first = asyncio.create_task(service.get_forecast(45.75, 4.85))
         await started.wait()
         second = asyncio.create_task(service.get_forecast(45.75, 4.85))
+        # Cède un tour de boucle pour laisser la seconde requête rejoindre la tâche partagée.
         await asyncio.sleep(0)
         release.set()
         return await asyncio.gather(first, second)
@@ -280,6 +257,7 @@ def test_simultaneous_requests_share_one_provider_call() -> None:
 
 
 def test_cache_discards_the_least_recently_used_position() -> None:
+    """Relire la première position protège son entrée : c’est la deuxième qui doit sortir."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
@@ -298,25 +276,35 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     assert list(service._cache) == [(1, 1), (3, 3)]
 
 
-def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
+@pytest.mark.parametrize(
+    ("provider_latitude", "provider_longitude"),
+    [(45.75, 4.85), (45.76, 4.86)],
+)
+def test_two_instances_share_a_forecast_through_the_distributed_cache(
+    memory_redis_store: RedisStore,
+    provider_latitude: float,
+    provider_longitude: float,
+) -> None:
+    """Le L2 reste partagé si les coordonnées fournisseur diffèrent de celles demandées."""
     moment = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
-    shared = SharedForecastCache()
+    settings = Settings()
     calls = 0
 
     async def fetcher(latitude: float, longitude: float) -> ForecastResponse:
         nonlocal calls
         calls += 1
-        return forecast_at(moment, latitude=latitude, longitude=longitude)
+        assert (latitude, longitude) == (45.75, 4.85)
+        return forecast_at(moment, latitude=provider_latitude, longitude=provider_longitude)
 
     first = ForecastService(
         fetcher,
         clock=MutableClock(moment),
-        shared_cache=shared,
+        shared_cache=RedisForecastCache(memory_redis_store, settings),
     )
     second = ForecastService(
         fetcher,
         clock=MutableClock(moment),
-        shared_cache=shared,
+        shared_cache=RedisForecastCache(memory_redis_store, settings),
     )
 
     async def scenario() -> tuple[ForecastResponse, ForecastResponse]:
@@ -330,3 +318,77 @@ def test_two_instances_share_a_forecast_through_the_distributed_cache() -> None:
     assert direct.from_cache is False
     assert cached.from_cache is True
     assert cached.generated_at == direct.generated_at
+    assert (cached.latitude, cached.longitude) == (provider_latitude, provider_longitude)
+
+
+@pytest.mark.parametrize(
+    ("age", "state", "recommendation_available"),
+    [(timedelta(minutes=16), "refresh_failed", True), (timedelta(minutes=61), "stale", False)],
+)
+def test_shared_refresh_timeout_preserves_the_previous_forecast(
+    memory_redis_store: RedisStore,
+    age: timedelta,
+    state: str,
+    recommendation_available: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """À l’expiration de l’attente, le repli conserve l’âge et les créneaux connus."""
+    caplog.set_level(logging.INFO, logger="mouvair_api")
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    previous = forecast_at(retrieved_at)
+    cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, clock=MutableClock(retrieved_at + age), shared_cache=cache)
+
+    async def scenario() -> ForecastResponse:
+        await cache.set(45.75, 4.85, previous)
+        token = await cache.acquire_lock(45.75, 4.85)
+        assert token is not None
+        try:
+            async with asyncio.timeout(1):
+                return await service.get_forecast(45.75, 4.85)
+        finally:
+            await cache.release_lock(45.75, 4.85, token)
+
+    fallback = asyncio.run(scenario())
+
+    assert fetcher.calls == 0
+    assert fallback.from_cache is True
+    assert fallback.data_state == state
+    assert fallback.recommendation_available is recommendation_available
+    assert fallback.generated_at == previous.generated_at
+    assert len(fallback.hours) == SLOT_COUNT
+    wait_events = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "forecast.shared_wait"
+    ]
+    fallback_events = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "forecast.fallback"
+    ]
+    assert len(wait_events) == len(fallback_events) == 1
+    assert wait_events[0]["outcome"] == "timeout"
+    assert fallback_events[0]["reason"] == "shared_refresh_timeout"
+
+
+def test_shared_refresh_timeout_without_previous_forecast_does_not_duplicate_the_fetch(
+    memory_redis_store: RedisStore,
+) -> None:
+    """Sans historique ni résultat partagé, la requête échoue sans doubler l’appel en cours."""
+    cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, shared_cache=cache)
+
+    async def scenario() -> None:
+        token = await cache.acquire_lock(45.75, 4.85)
+        assert token is not None
+        try:
+            async with asyncio.timeout(1):
+                with pytest.raises(DataUnavailableError, match="déjà en cours"):
+                    await service.get_forecast(45.75, 4.85)
+        finally:
+            await cache.release_lock(45.75, 4.85, token)
+
+    asyncio.run(scenario())
+
+    assert fetcher.calls == 0

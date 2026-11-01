@@ -1,4 +1,7 @@
-"""Mouv'Air API."""
-"""Package principal de l’API Mouv’Air."""
+"""Package de l’API de prévisions et de notation des activités extérieures.
 
-__version__ = "0.4.0"
+La version est importée au démarrage pour les métadonnées FastAPI et le User-Agent
+des appels sortants. Le script de release la synchronise avec pyproject.toml.
+"""
+
+__version__ = "0.4.1"
