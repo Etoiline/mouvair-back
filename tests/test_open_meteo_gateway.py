@@ -1,4 +1,12 @@
+"""Teste la frontière entre budget partagé, appels fournisseur et erreurs métier.
+
+Le quota simulé enregistre les coûts et les attentes. monkeypatch remplace les
+chargements de données ; MockTransport simule un vrai échange httpx pour vérifier
+la lecture de Retry-After sans contacter un service externe.
+"""
+
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -14,21 +22,25 @@ from mouvair_api.rate_limit import RateLimitBackendUnavailable, RateLimitExceede
 
 
 class FakeQuota:
+    """Double enregistrant les réservations et les périodes de blocage demandées."""
     def __init__(self, error: Exception | None = None) -> None:
         self.costs: list[int] = []
         self.blocked: list[int] = []
         self.error = error
 
     async def reserve(self, cost: int) -> None:
+        """Mémorise le coût même si le scénario doit ensuite refuser cette réservation."""
         self.costs.append(cost)
         if self.error is not None:
             raise self.error
 
     async def block_for(self, seconds: int) -> None:
+        """Capture l’attente qui devrait être propagée aux autres instances."""
         self.blocked.append(seconds)
 
 
 def test_gateway_reserves_one_geocoding_call_and_two_forecast_calls(monkeypatch) -> None:
+    """Les opérations métier réservent respectivement un et deux appels avant leur exécution."""
     quota = FakeQuota()
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -57,8 +69,10 @@ def test_gateway_reserves_one_geocoding_call_and_two_forecast_calls(monkeypatch)
     [RateLimitExceeded(17), RateLimitBackendUnavailable("indisponible")],
 )
 def test_gateway_converts_quota_failures_without_calling_the_provider(
-    monkeypatch, error: Exception
+    monkeypatch, error: Exception, caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Un refus ou une panne de quota doit remonter avant toute tentative d’appel fournisseur."""
+    caplog.set_level(logging.INFO, logger="mouvair_api")
     called = False
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -79,9 +93,21 @@ def test_gateway_converts_quota_failures_without_calling_the_provider(
     caught = asyncio.run(scenario())
     assert caught.retry_after == (17 if isinstance(error, RateLimitExceeded) else 5)
     assert called is False
+    recorded = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "provider.quota_rejected"
+    ]
+    assert len(recorded) == 1
+    assert recorded[0]["retry_after"] == caught.retry_after
+    assert recorded[0]["cost"] == 1
+    assert recorded[0]["reason"] == (
+        "quota_or_cooldown" if isinstance(error, RateLimitExceeded) else "redis_unavailable"
+    )
 
 
-def test_provider_429_creates_a_shared_cooldown(monkeypatch) -> None:
+def test_provider_429_creates_a_shared_cooldown(monkeypatch, caplog) -> None:
+    """Une limitation fournisseur de 23 secondes devient une attente partagée et une erreur 503."""
+    caplog.set_level(logging.INFO, logger="mouvair_api")
     quota = FakeQuota()
 
     async def fake_locations(query: str, count: int, *, client) -> list[Location]:
@@ -99,9 +125,17 @@ def test_provider_429_creates_a_shared_cooldown(monkeypatch) -> None:
 
     asyncio.run(scenario())
     assert quota.blocked == [23]
+    recorded = [
+        record.diagnostic_fields for record in caplog.records
+        if record.name == "mouvair_api" and record.getMessage() == "provider.rate_limited"
+    ]
+    assert len(recorded) == 1
+    assert recorded[0]["operation"] == "locations"
+    assert recorded[0]["retry_after"] == 23
 
 
 def test_http_429_retry_after_is_preserved() -> None:
+    """Le délai annoncé par l’en-tête HTTP reste intact dans l’exception de bas niveau."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "37"}, request=request)
 

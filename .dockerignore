@@ -1,6 +1,9 @@
+# Le contexte Docker ne contient ni historique Git ni environnement Python du poste.
 .git
 .venv
+# Les secrets de configuration sont fournis au lancement, pas copiés dans l’image.
 .env
+# Fichiers générés et caches des outils de développement.
 __pycache__
 *.py[cod]
 *.egg-info
@@ -8,4 +11,5 @@ __pycache__
 .ruff_cache
 .tmp
 pytest-cache-files-*
+# La construction de production installe les sources ; les tests s’exécutent en développement.
 tests

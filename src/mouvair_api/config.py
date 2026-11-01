@@ -1,3 +1,10 @@
+"""Centralise les paramètres réseau, les caches et les limites de consommation.
+
+Settings est immuable après construction. Les valeurs par défaut permettent de
+décrire le service sans charger de fichier ; from_env lit l’environnement du
+processus. En développement, Uvicorn charge .env avec son option --env-file.
+"""
+
 import os
 from dataclasses import dataclass
 from ipaddress import ip_network
@@ -5,6 +12,8 @@ from typing import Literal
 
 RedisFailureMode = Literal["closed", "local"]
 
+# Références fournisseur retenues par le projet ; les seuils configurés doivent
+# rester strictement inférieurs et réserver au moins deux appels pour une prévision.
 OFFICIAL_QUOTA_MINUTE = 600
 OFFICIAL_QUOTA_HOUR = 5_000
 OFFICIAL_QUOTA_DAY = 10_000
@@ -12,6 +21,7 @@ OFFICIAL_QUOTA_MONTH = 300_000
 
 
 def _integer(name: str, default: int) -> int:
+    """Lit un entier et nomme explicitement la variable en cas de valeur invalide."""
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
@@ -22,6 +32,7 @@ def _integer(name: str, default: int) -> int:
 
 
 def _float(name: str, default: float) -> float:
+    """Lit notamment les délais réseau, qui peuvent être inférieurs à une seconde."""
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
@@ -32,6 +43,7 @@ def _float(name: str, default: float) -> float:
 
 
 def _items(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Transforme une liste séparée par des virgules en valeurs nettoyées non vides."""
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
@@ -40,6 +52,14 @@ def _items(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Settings:
+    """Configuration complète, injectable directement dans les tests.
+
+    closed protège le quota global en cas de panne Redis. local autorise un repli
+    propre au processus, adapté au développement sans coordination multi-instance.
+    Les durées des champs suffixés _seconds sont toujours exprimées en secondes.
+    """
+
+    # CORS autorise les URL du frontend ; le préfixe Redis isole les clés du service.
     frontend_origins: tuple[str, ...] = ("http://localhost:5173",)
     redis_url: str | None = None
     redis_key_prefix: str = "mouvair"
@@ -48,27 +68,33 @@ class Settings:
     redis_connect_timeout_seconds: float = 0.5
     redis_retry_delay_seconds: float = 5.0
     redis_max_connections: int = 20
+    # Même périmètre et même Redis pour les instances partageant un budget fournisseur.
     open_meteo_quota_scope: str = "free-api"
     open_meteo_quota_minute: int = 540
     open_meteo_quota_hour: int = 4_500
     open_meteo_quota_day: int = 9_000
     open_meteo_quota_month: int = 270_000
+    # Une recherche vide expire plus vite pour ne pas figer longtemps une absence.
     geocoding_cache_ttl_seconds: int = 86_400
     geocoding_negative_cache_ttl_seconds: int = 300
     geocoding_local_cache_max_entries: int = 512
     geocoding_lock_ttl_seconds: int = 12
     geocoding_lock_wait_seconds: float = 4.0
+    # Conservation L2 pour le repli ; la fraîcheur métier de 15 min est décidée ailleurs.
     forecast_shared_cache_ttl_seconds: int = 86_400
     forecast_lock_ttl_seconds: int = 20
     forecast_lock_wait_seconds: float = 6.0
+    # Les limites entrantes s’appliquent même aux lectures de cache, par identité client.
     location_rate_limit_minute: int = 120
     location_rate_limit_hour: int = 1_200
     forecast_rate_limit_minute: int = 40
     forecast_rate_limit_hour: int = 240
+    # La valeur locale doit être remplacée avant exposition ; les CIDR autorisent les proxies.
     client_id_hmac_secret: str = "mouvair-local-development"
     trusted_proxy_cidrs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        """Refuse une configuration incohérente dès la création de l’application."""
         if self.redis_failure_mode not in ("closed", "local"):
             raise ValueError("REDIS_FAILURE_MODE doit valoir closed ou local")
         if not self.redis_key_prefix.strip(": "):
@@ -83,6 +109,7 @@ class Settings:
         except ValueError as exc:
             raise ValueError("TRUSTED_PROXY_CIDRS contient un réseau invalide") from exc
 
+        # Une expiration ou une attente non positive casserait les garanties des caches.
         positive_values = {
             "REDIS_SOCKET_TIMEOUT_SECONDS": self.redis_socket_timeout_seconds,
             "REDIS_CONNECT_TIMEOUT_SECONDS": self.redis_connect_timeout_seconds,
@@ -105,6 +132,7 @@ class Settings:
             if value <= 0:
                 raise ValueError(f"{name} doit être strictement positif")
 
+        # Chaque fenêtre doit accepter la réservation atomique météo + air et garder une marge.
         quota_limits = (
             ("OPEN_METEO_QUOTA_MINUTE", self.open_meteo_quota_minute, OFFICIAL_QUOTA_MINUTE),
             ("OPEN_METEO_QUOTA_HOUR", self.open_meteo_quota_hour, OFFICIAL_QUOTA_HOUR),
@@ -117,6 +145,11 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """Lit les variables à l’appel et laisse __post_init__ valider l’ensemble.
+
+        Une URL Redis vide est traitée comme une absence de configuration. Ce choix
+        ne force pas le mode local : le comportement closed reste celui par défaut.
+        """
         redis_url = os.getenv("REDIS_URL")
         raw_failure_mode = os.getenv("REDIS_FAILURE_MODE", "closed")
         if raw_failure_mode not in ("closed", "local"):

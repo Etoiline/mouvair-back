@@ -1,3 +1,10 @@
+"""Teste la normalisation, les deux caches et la mutualisation du géocodage.
+
+Les doubles de stockage permettent de déclencher des pannes déterministes et
+d’inspecter les TTL sans lancer Redis. Les fetchers comptent les appels pour
+vérifier que les variantes d’une même recherche partagent bien leur résultat.
+"""
+
 import asyncio
 from collections.abc import Awaitable, Callable
 
@@ -8,6 +15,11 @@ from mouvair_api.redis_store import RedisUnavailable
 
 
 class MemoryStore:
+    """Double des primitives Redis avec valeurs, TTL observables et possession de verrous.
+
+    Les expirations ne s’écoulent pas ici : seul le TTL demandé est vérifié.
+    L’isolation des clés et le jeton de verrou conservent le contrat utile aux tests.
+    """
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
@@ -39,6 +51,7 @@ class MemoryStore:
 
 
 class UnavailableStore(MemoryStore):
+    """Stockage toujours en panne pour forcer les chemins de récupération sans L2."""
     async def get(self, key: str) -> str | None:
         del key
         raise RedisUnavailable("indisponible")
@@ -53,6 +66,7 @@ class UnavailableStore(MemoryStore):
 
 
 class ToggleStore(MemoryStore):
+    """Stockage activable pour tomber en panne après le remplissage du cache local."""
     def __init__(self) -> None:
         super().__init__()
         self.available = True
@@ -74,6 +88,7 @@ class ToggleStore(MemoryStore):
 
 
 def lyon() -> Location:
+    """Ville stable partagée par les assertions, sans dépendance au géocodage réel."""
     return Location(id=1, name="Lyon", latitude=45.75, longitude=4.85, country="France")
 
 
@@ -81,14 +96,17 @@ def service_with(
     fetcher: Callable[[str, int], Awaitable[list[Location]]],
     store: MemoryStore,
 ) -> GeocodingService:
+    """Assemble un service de test avec le fournisseur et le stockage choisis."""
     return GeocodingService(fetcher, store, Settings(redis_failure_mode="local"))
 
 
 def test_query_normalization_preserves_accents_and_collapses_spaces() -> None:
+    """Le nettoyage doit conserver l’accent du toponyme tout en retirant les espaces inutiles."""
     assert normalize_location_query("  SAINT-Étienne  ") == "SAINT-Étienne"
 
 
 def test_queries_shorter_than_three_characters_never_reach_the_provider() -> None:
+    """Le seuil porte sur le texte nettoyé : les espaces de « Ly » ne complètent pas la saisie."""
     calls = 0
 
     async def fetcher(query: str, count: int) -> list[Location]:
@@ -103,6 +121,7 @@ def test_queries_shorter_than_three_characters_never_reach_the_provider() -> Non
 
 
 def test_normalized_queries_share_the_positive_cache() -> None:
+    """Casse et espaces différents retrouvent la même ville après un seul appel sortant."""
     calls: list[tuple[str, int]] = []
 
     async def fetcher(query: str, count: int) -> list[Location]:
@@ -123,6 +142,7 @@ def test_normalized_queries_share_the_positive_cache() -> None:
 
 
 def test_two_instances_share_the_redis_cache() -> None:
+    """La deuxième instance relit le stockage commun malgré son propre cache mémoire vide."""
     store = MemoryStore()
     calls = 0
 
@@ -143,6 +163,7 @@ def test_two_instances_share_the_redis_cache() -> None:
 
 
 def test_empty_results_use_the_short_negative_ttl() -> None:
+    """Une liste vide est un résultat mémorisable, mais seulement pendant cinq minutes."""
     store = MemoryStore()
 
     async def fetcher(query: str, count: int) -> list[Location]:
@@ -155,6 +176,7 @@ def test_empty_results_use_the_short_negative_ttl() -> None:
 
 
 def test_local_cache_remains_available_during_a_redis_failure() -> None:
+    """Une ville déjà en mémoire reste disponible quand le stockage partagé devient inaccessible."""
     store = ToggleStore()
     calls = 0
 
@@ -176,6 +198,7 @@ def test_local_cache_remains_available_during_a_redis_failure() -> None:
 
 
 def test_simultaneous_queries_share_one_local_fetch() -> None:
+    """Même sans Redis, deux recherches concurrentes attendent une seule récupération locale."""
     store = UnavailableStore()
     started = asyncio.Event()
     release = asyncio.Event()
@@ -195,6 +218,7 @@ def test_simultaneous_queries_share_one_local_fetch() -> None:
         first = asyncio.create_task(service.search("Lyon"))
         await started.wait()
         second = asyncio.create_task(service.search("Lyon"))
+        # Laisse la seconde tâche rejoindre la recherche avant de débloquer le fournisseur.
         await asyncio.sleep(0)
         release.set()
         assert await asyncio.gather(first, second) == [[lyon()], [lyon()]]

@@ -1,8 +1,13 @@
+# Métadonnées du package Python. Le script de release synchronise cette
+# version avec mouvair_api.__version__, utilisée par les métadonnées HTTP de l’API.
 [project]
 name = "mouvair-back"
-version = "0.4.0"
+version = "0.4.1"
 description = "Indice horaire des conditions extérieures pour quatre activités sportives"
 requires-python = ">=3.12,<4.0"
+# Dépendances d’exécution épinglées. Les outils de test sont séparés dans l’extra dev.
+# httpx et redis assurent les accès asynchrones ; tzdata fournit les fuseaux IANA
+# notamment sur les systèmes dépourvus de base de fuseaux, comme Windows.
 dependencies = [
     "fastapi==0.141.1",
     "httpx==0.28.1",
@@ -12,30 +17,41 @@ dependencies = [
     "uvicorn[standard]==0.52.4",
 ]
 
+# uv sync --locked --extra dev ajoute les outils du même verrou au package éditable.
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.4,<10",
-    "ruff>=0.16,<0.18",
+    "pytest==9.1.1",
+    "ruff==0.16.6",
 ]
 
+# Le constructeur est lui aussi épinglé, y compris dans l’environnement de build isolé.
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
+# Le poste local, Docker et la CI utilisent le même format et le même moteur de verrouillage.
+[tool.uv]
+required-version = "==0.13.6"
+
+# Le layout src évite de confondre les sources Python avec les fichiers à la racine.
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Pytest importe les sources et le script de release ; la découverte reste limitée aux tests.
+# Les tests Redis restent ignorés tant que TEST_REDIS_URL n’est pas configurée.
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 markers = [
     "redis_integration: nécessite une instance Redis réelle configurée par TEST_REDIS_URL",
 ]
 
+# Ruff vérifie la syntaxe compatible Python 3.12 et la longueur des lignes.
 [tool.ruff]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
 
+# E/F : erreurs et symboles ; I : imports ; B : pièges ; UP : modernisation ; SIM : simplicité.
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

@@ -1,9 +1,16 @@
+"""Vérifie les valeurs de protection par défaut et les configurations refusées.
+
+Les quotas doivent garder leur marge et accepter une prévision complète de
+deux appels ; un mode de panne Redis mal orthographié doit échouer explicitement.
+"""
+
 import pytest
 
 from mouvair_api.config import Settings
 
 
 def test_quota_defaults_keep_a_ten_percent_safety_margin() -> None:
+    """Fige les seuils du projet à 90 % des références fournisseur retenues."""
     settings = Settings()
 
     assert settings.open_meteo_quota_minute == 540
@@ -13,6 +20,7 @@ def test_quota_defaults_keep_a_ten_percent_safety_margin() -> None:
 
 
 def test_client_rate_limit_defaults_allow_interactive_usage() -> None:
+    """Conserve les budgets entrants prévus pour la recherche et la consultation répétées."""
     settings = Settings()
 
     assert settings.location_rate_limit_minute == 120
@@ -33,16 +41,19 @@ def test_client_rate_limit_defaults_allow_interactive_usage() -> None:
 def test_quota_configuration_cannot_reach_the_official_limit(
     field: str, value: int
 ) -> None:
+    """Chaque fenêtre refuse une valeur atteignant la limite fournisseur de référence."""
     with pytest.raises(ValueError, match="doit être compris"):
         Settings(**{field: value})
 
 
 def test_each_provider_window_can_reserve_a_complete_forecast() -> None:
+    """Une limite d’une unité rendrait toute récupération météo + air impossible."""
     with pytest.raises(ValueError, match="compris entre 2"):
         Settings(open_meteo_quota_minute=1)
 
 
 def test_environment_configuration_rejects_an_unknown_failure_mode(monkeypatch) -> None:
+    """Une valeur inconnue ne doit pas activer implicitement un comportement permissif."""
     monkeypatch.setenv("REDIS_FAILURE_MODE", "open")
 
     with pytest.raises(ValueError, match="closed ou local"):

@@ -1,6 +1,47 @@
+# Environnement local de l’API et de son stockage partagé Redis.
+# Le frontend Vite utilise l’API publiée sur localhost:8000 depuis le poste hôte.
 services:
+  api:
+    # Réutilise l’image du backend construite à partir du Dockerfile du dépôt.
+    build:
+      context: .
+    # Le fichier local peut ajuster les quotas et les origines sans entrer dans l’image.
+    # Il reste facultatif pour permettre un premier lancement avec les valeurs par défaut.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: "8000"
+      # Dans un conteneur, Redis est joint par son nom de service, pas par 127.0.0.1.
+      REDIS_URL: redis://redis:6379/0
+      REDIS_FAILURE_MODE: closed
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # La bibliothèque standard suffit : l’image n’a pas besoin de curl.
+      # Le HTTP 200 seul ne suffit pas, car /health répond aussi en mode dégradé.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json
+          import urllib.request
+          with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2) as response:
+              payload = json.load(response)
+          raise SystemExit(0 if payload.get("status") == "ok" and payload.get("redis") == "ok" else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
   redis:
-    image: redis:8.2-alpine
+    # Même image Redis 8.2.9 que la CI, figée sans dépendre des mises à jour du tag.
+    image: redis:8.2-alpine@sha256:30abb90e62f14b737010746def3ba99cc79fe19dcdb3d37b41f21fc62e7da19d
+    # AOF conserve les écritures ; everysec synchronise le journal chaque seconde.
+    # noeviction évite de supprimer silencieusement des compteurs de quota sous pression mémoire.
     command:
       - redis-server
       - --appendonly
@@ -9,15 +50,19 @@ services:
       - everysec
       - --maxmemory-policy
       - noeviction
+    # L’écoute publiée reste sur la boucle locale du poste de développement.
     ports:
       - "127.0.0.1:6379:6379"
+    # Le volume survit à un arrêt du service et conserve l’historique des quotas.
     volumes:
       - redis-data:/data
+    # Redis est considéré disponible lorsqu’il répond à PING, sans écrire de donnée métier.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+# Supprimer explicitement ce volume effacerait les caches et les compteurs persistants.
 volumes:
   redis-data:

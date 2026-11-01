@@ -1,3 +1,12 @@
+"""Calcule des notes explicables de conditions extérieures pour quatre activités.
+
+Chaque profil transforme température ressentie, pluie et vent en sous-notes par
+interpolation. La météo et l’air sont combinés avec des plafonds empêchant un
+facteur très dégradé d’être masqué par les autres. Les calculs gardent leurs
+décimales ; seules les valeurs publiques sont arrondies. Ce module est indépendant
+du réseau et du cache, ce qui permet de vérifier les règles avec de simples données.
+"""
+
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
@@ -16,11 +25,18 @@ from .models import (
     WeatherScore,
 )
 
+# Chaque point associe une mesure physique à une note ; les mesures sont croissantes.
 Curve = tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
 class SportProfile:
+    """Paramètres métier d’une activité d’une heure.
+
+    weather_weights pondère les trois facteurs météo. weather_share et air_share
+    pondèrent les deux familles dans la globale. Les courbes utilisent les °C,
+    mm et km/h ; snow_cap ajoute la limite propre à l’activité en cas de neige.
+    """
     id: SportId
     label: str
     activity_name: str
@@ -35,17 +51,29 @@ class SportProfile:
 
 @dataclass(frozen=True)
 class RawWeatherScore:
+    """Sépare la météo publique arrondie de sa valeur précise et des plafonds d’événements.
+
+    La globale doit utiliser score, et non public.score, pour éviter qu’un arrondi
+    intermédiaire change le résultat final. Les plafonds d’événements y sont réappliqués.
+    Les facteurs d’explication sont gardés à part pour adapter le texte après le
+    calcul de la globale, sans changer leur priorité ni les notes.
+    """
     public: WeatherScore
     score: float | None
     event_caps: tuple[int, ...]
+    reason_factors: tuple[tuple[WeatherFactorId, bool], ...] = ()
 
 
 @dataclass(frozen=True)
 class RawAirScore:
+    """Garde l’AQI converti sans arrondi en complément de la section air affichable."""
     public: AirScore
     score: float | None
 
 
+# Les règles spécifiques sont rassemblées ici pour modifier un sport sans toucher
+# à l’algorithme. Un plateau à 100 décrit sa plage idéale ; hors des extrêmes,
+# la première ou la dernière note de la courbe reste appliquée.
 PROFILES: dict[SportId, SportProfile] = {
     "easy_run": SportProfile(
         id="easy_run",
@@ -133,6 +161,8 @@ PROFILES: dict[SportId, SportProfile] = {
     ),
 }
 
+# Un code inconnu ou une borne absente rend la météo incomplète : les alertes
+# déjà reconnues restent visibles, mais une absence de code ne vaut pas « ciel clair ».
 VALID_WEATHER_CODES = {
     0,
     1,
@@ -176,7 +206,11 @@ SNOW_ALERT = "Chutes de neige prévues : adaptez votre sortie aux conditions du 
 
 
 def interpolate(value: float, curve: Curve) -> float:
-    """Calcule une sous-note par interpolation linéaire sur une courbe ordonnée."""
+    """Calcule une sous-note par interpolation linéaire sur une courbe ordonnée.
+
+    Entre deux points, la note évolue proportionnellement à la mesure. Au-delà
+    des bornes, la note de l’extrémité est conservée sans extrapolation.
+    """
     if value <= curve[0][0]:
         return curve[0][1]
     if value >= curve[-1][0]:
@@ -193,15 +227,21 @@ def interpolate(value: float, curve: Curve) -> float:
 
 
 def clamp(value: float, minimum: float = 0, maximum: float = 100) -> float:
+    """Borne une valeur dans un intervalle fermé, par défaut l’échelle de notation."""
     return max(minimum, min(value, maximum))
 
 
 def round_half_up(value: float) -> int:
-    """Arrondit à l’entier le plus proche en envoyant les demis vers le haut."""
+    """Arrondit à l’entier le plus proche en envoyant les demis vers le haut.
+
+    Decimal reçoit une chaîne pour conserver la représentation décimale de la
+    valeur ; ROUND_HALF_UP évite l’arrondi des demis vers l’entier pair de round.
+    """
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def score_status(score: int) -> ScoreStatus:
+    """Classe une note affichée entière avec des seuils inclusifs 80, 60, 40 et 20."""
     if score >= 80:
         return "favorable"
     if score >= 60:
@@ -214,17 +254,23 @@ def score_status(score: int) -> ScoreStatus:
 
 
 def _is_finite(value: float | None) -> bool:
+    """Refuse les absences, NaN et infinis avant d’évaluer une courbe."""
     return value is not None and isfinite(value)
 
 
 def _is_non_negative(value: float | None) -> bool:
+    """Ajoute la contrainte physique positive ou nulle pour pluie, vent et AQI."""
     return _is_finite(value) and value >= 0
 
 
 def select_apparent_temperature(
     start: float | None, end: float | None, sport: SportId
 ) -> float | None:
-    """Retient la borne donnant la sous-note thermique la plus basse pour l’activité."""
+    """Retient la borne donnant la sous-note thermique la plus basse pour l’activité.
+
+    Choisir simplement le maximum de température serait faux en période froide.
+    Les deux bornes doivent être connues ; en cas d’égalité, le départ est retenu.
+    """
     if not _is_finite(start) or not _is_finite(end):
         return None
     curve = PROFILES[sport].temperature_curve
@@ -234,6 +280,7 @@ def select_apparent_temperature(
 
 
 def _wind_exposure(conditions: Conditions, sport: SportId) -> float | None:
+    """Combine vent moyen et rafales avec une sensibilité plus élevée pour le vélo."""
     if not _is_non_negative(conditions.wind_speed) or not _is_non_negative(
         conditions.wind_gusts
     ):
@@ -243,6 +290,7 @@ def _wind_exposure(conditions: Conditions, sport: SportId) -> float | None:
 
 
 def _condition_codes(conditions: Conditions) -> tuple[int | None, ...]:
+    """Réunit les codes sans doublons en conservant les bornes explicitement inconnues."""
     codes: list[int | None] = []
     if conditions.weather_code is not None:
         codes.append(conditions.weather_code)
@@ -253,6 +301,11 @@ def _condition_codes(conditions: Conditions) -> tuple[int | None, ...]:
 def _event_alerts_and_caps(
     codes: tuple[int | None, ...], profile: SportProfile
 ) -> tuple[list[str], tuple[int, ...]]:
+    """Détecte les événements et conserve l’ordre d’alerte orage, verglas, puis neige.
+
+    Tous les plafonds détectés sont retournés ; prendre leur minimum fera
+    prévaloir le plus sévère, même si plusieurs événements coexistent.
+    """
     alerts: list[str] = []
     caps: list[int] = []
     code_set = set(codes)
@@ -273,6 +326,7 @@ def _event_alerts_and_caps(
 def _factor_reason(
     factor_id: WeatherFactorId, profile: SportProfile, *, strongly: bool
 ) -> str:
+    """Produit un message français stable pour un facteur pénalisant et son activité."""
     emphasis = " fortement" if strongly else ""
     if factor_id == "temperature":
         return (
@@ -290,12 +344,18 @@ def _factor_reason(
     )
 
 
-def _weather_reasons(
+def _weather_reason_factors(
     factor_scores: dict[WeatherFactorId, float],
     profile: SportProfile,
     weighted_score: float,
-    alerts: list[str],
-) -> list[str]:
+) -> tuple[tuple[WeatherFactorId, bool], ...]:
+    """Choisit au plus deux facteurs expliquant la dégradation de la météo.
+
+    Un facteur qui impose le plafond le plus bas est prioritaire. Les suivants
+    sont classés par perte pondérée ; l’ordre température, pluie, vent départage
+    les égalités pour garantir des explications déterministes.
+    Le booléen indique le facteur qui impose le plafond, sans fixer encore le ton.
+    """
     factor_order: tuple[WeatherFactorId, ...] = ("temperature", "rain", "wind")
     progressive_caps = {
         factor_id: min(100, factor_scores[factor_id] + 20) for factor_id in factor_order
@@ -331,15 +391,38 @@ def _weather_reasons(
         if len(selected) == 2:
             break
 
-    if not selected and not alerts:
+    return tuple(selected)
+
+
+def _weather_reasons(
+    weather: RawWeatherScore, overall: ScoreSummary, profile: SportProfile
+) -> list[str]:
+    """Accorde le ton aux appréciations météo et globale effectivement affichées.
+
+    Un plafond actif peut encore laisser des conditions correctes ou favorables.
+    « Fortement » exige donc que les deux appréciations soient sous « Correct ».
+    Une note absente ne justifie pas non plus cette intensité.
+    """
+    if weather.score is None:
+        return []
+    if not weather.reason_factors and not weather.public.alerts:
         return ["Conditions météo favorables pour cette activité."]
+    degraded_statuses = {"mitigé", "défavorable", "très défavorable"}
+    allow_strong = (
+        weather.public.status in degraded_statuses and overall.status in degraded_statuses
+    )
     return [
-        _factor_reason(factor_id, profile, strongly=strongly)
-        for factor_id, strongly in selected
+        _factor_reason(factor_id, profile, strongly=limits_score and allow_strong)
+        for factor_id, limits_score in weather.reason_factors
     ]
 
 
 def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeatherScore:
+    """Calcule les sous-notes, exige la complétude, puis applique tous les plafonds.
+
+    Les facteurs disponibles et les alertes sont construits avant le contrôle de
+    complétude pour rester consultables même quand aucune note météo n’est possible.
+    """
     temperature_score = (
         interpolate(conditions.apparent_temperature, profile.temperature_curve)
         if _is_finite(conditions.apparent_temperature)
@@ -355,6 +438,7 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
         interpolate(wind_exposure, profile.wind_curve) if wind_exposure is not None else None
     )
 
+    # Les mesures et les sous-notes publiques rendent chaque contribution inspectable.
     factors = [
         ScoreFactor(
             id="temperature",
@@ -385,6 +469,7 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
 
     codes = _condition_codes(conditions)
     alerts, event_caps = _event_alerts_and_caps(codes, profile)
+    # Une seule borne météo inconnue suffit à suspendre la note complète du créneau.
     complete_codes = bool(codes) and all(code in VALID_WEATHER_CODES for code in codes)
     raw_factor_scores = (temperature_score, rain_score, wind_score)
     if not complete_codes or any(score is None for score in raw_factor_scores):
@@ -409,6 +494,7 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
         factor_scores[factor_id] * weight
         for factor_id, weight in profile.weather_weights.items()
     )
+    # Aucun facteur ne peut être compensé de plus de 20 points par les autres.
     progressive_caps = tuple(min(100, score + 20) for score in factor_scores.values())
     raw_score = min(weighted_score, *progressive_caps, *event_caps, 100)
     displayed_score = round_half_up(raw_score)
@@ -418,15 +504,17 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
             score=displayed_score,
             status=score_status(displayed_score),
             factors=factors,
-            reasons=_weather_reasons(factor_scores, profile, weighted_score, alerts),
+            reasons=[],
             alerts=alerts,
         ),
         score=raw_score,
         event_caps=event_caps,
+        reason_factors=_weather_reason_factors(factor_scores, profile, weighted_score),
     )
 
 
 def _air_category(aqi: float) -> AirQualityCategory:
+    """Classe l’AQI d’origine avec bornes supérieures incluses, avant conversion en note."""
     if aqi <= 20:
         return "Bonne"
     if aqi <= 40:
@@ -441,6 +529,7 @@ def _air_category(aqi: float) -> AirQualityCategory:
 
 
 def _air_recommendations(category: AirQualityCategory) -> AirRecommendations:
+    """Associe la catégorie AQI à des messages généraux, indépendants du sport choisi."""
     if category in {"Bonne", "Acceptable"}:
         return AirRecommendations(
             general_population="Activités extérieures habituelles.",
@@ -474,6 +563,11 @@ def _air_recommendations(category: AirQualityCategory) -> AirRecommendations:
 
 
 def _calculate_air(aqi: float | None) -> RawAirScore:
+    """Convertit un AQI valide en max(0, 100 - AQI) et conserve sa catégorie d’origine.
+
+    Un indice au-delà de 100 produit toujours zéro, mais garde sa valeur et sa
+    catégorie pour ne pas perdre l’information décrivant la pollution prévue.
+    """
     if not _is_non_negative(aqi):
         return RawAirScore(public=AirScore(score=None), score=None)
 
@@ -498,6 +592,11 @@ def _calculate_air(aqi: float | None) -> RawAirScore:
 def _calculate_overall(
     weather: RawWeatherScore, air: RawAirScore, profile: SportProfile
 ) -> ScoreSummary:
+    """Combine les valeurs précises et limite la compensation entre météo et air.
+
+    Les deux notes sont nécessaires. La moyenne propre au sport est limitée à
+    chaque famille + 20 et aux événements dangereux, puis seulement arrondie.
+    """
     if weather.score is None or air.score is None:
         return ScoreSummary(score=None, status="incomplet")
 
@@ -516,23 +615,33 @@ def _calculate_overall(
 def _build_sport_score(
     conditions: Conditions, profile: SportProfile, air: RawAirScore
 ) -> SportScore:
+    """Assemble les trois sections publiques en gardant les calculs précis en interne."""
     weather = _calculate_weather(conditions, profile)
     overall = _calculate_overall(weather, air, profile)
+    weather_public = weather.public.model_copy(
+        update={"reasons": _weather_reasons(weather, overall, profile)}
+    )
     return SportScore(
         sport=profile.id,
         label=profile.label,
-        weather=weather.public,
+        weather=weather_public,
         air=air.public,
         overall=overall,
     )
 
 
 def calculate_score(conditions: Conditions, sport: SportId) -> SportScore:
+    """Évalue une activité dont la température représentative a déjà été sélectionnée."""
     air = _calculate_air(conditions.european_aqi)
     return _build_sport_score(conditions, PROFILES[sport], air)
 
 
 def calculate_all_scores(conditions: Conditions) -> dict[SportId, SportScore]:
+    """Évalue les quatre sports pour un même jeu de mesures en mutualisant le calcul air.
+
+    L’assemblage horaire appelle plutôt calculate_score pour chaque activité,
+    car la température la plus pénalisante peut différer entre deux profils.
+    """
     air = _calculate_air(conditions.european_aqi)
     return {
         sport: _build_sport_score(conditions, profile, air)

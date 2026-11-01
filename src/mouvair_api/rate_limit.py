@@ -1,3 +1,11 @@
+"""Protège les appels entrants et le budget sortant avec des fenêtres glissantes.
+
+Redis enregistre une unité par appel dans un ensemble trié par instant. Un script
+atomique vérifie toutes les fenêtres avant de débiter le coût complet. Le repli
+local est autorisé pour les clients et, sur choix explicite, pour le fournisseur.
+Une attente partagée propage les limitations signalées par Open-Meteo.
+"""
+
 import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -8,8 +16,14 @@ from uuid import uuid4
 from .config import Settings
 from .redis_store import RedisStore, RedisUnavailable
 
+# Une durée de 31 jours fournit la fenêtre longue commune à toutes les réservations.
 MONTH_WINDOW_SECONDS = 31 * 24 * 60 * 60
 
+# Étapes du script : reconnaître une réservation déjà effectuée, retirer les unités
+# expirées, vérifier chaque fenêtre, puis ajouter tout le coût seulement si autorisé.
+# TIME utilise l’horloge Redis pour que les instances partagent la même référence.
+# Chaque unité a un membre distinct : une prévision de coût 2 occupe deux places.
+# En cas de refus, les plus anciens événements déterminent le délai de libération.
 SLIDING_WINDOW_SCRIPT = """
 local key = KEYS[1]
 local cost = tonumber(ARGV[1])
@@ -69,28 +83,38 @@ return {1, 0}
 
 @dataclass(frozen=True)
 class RateWindow:
+    """Plafond d’unités sur une durée glissante exprimée en secondes."""
     seconds: int
     limit: int
 
 
 @dataclass(frozen=True)
 class RateDecision:
+    """Résultat d’une réservation avec attente minimale en secondes si elle est refusée."""
     allowed: bool
     retry_after: int = 0
 
 
 class RateLimitExceeded(RuntimeError):
+    """Refus temporaire utilisable par le middleware ou la passerelle fournisseur."""
+
     def __init__(self, retry_after: int) -> None:
+        """Normalise le délai pour ne jamais suggérer une reprise immédiate."""
         super().__init__("Limite de requêtes atteinte")
         self.retry_after = max(1, retry_after)
 
 
 class RateLimitBackendUnavailable(RuntimeError):
+    """Indique qu’aucun compteur autorisé ne peut garantir la réservation demandée."""
+
     pass
 
 
 class RedisSlidingWindowLimiter:
+    """Adapte le script atomique aux structures Python de fenêtres et de décision."""
+
     def __init__(self, store: RedisStore) -> None:
+        """Réutilise la connexion et le traitement d’erreur Redis de l’application."""
         self._store = store
 
     async def reserve(
@@ -101,6 +125,7 @@ class RedisSlidingWindowLimiter:
         cost: int = 1,
         reservation_id: str | None = None,
     ) -> RateDecision:
+        """Réserve un coût indivisible et identifie l’opération pour éviter un double débit."""
         _validate_request(windows, cost)
         arguments: list[object] = [cost, reservation_id or uuid4().hex, len(windows)]
         for window in windows:
@@ -110,9 +135,15 @@ class RedisSlidingWindowLimiter:
 
 
 class LocalSlidingWindowLimiter:
-    """Repli explicite, limité au processus et donc non adapté au multi-instance."""
+    """Repli explicite, limité au processus et donc non adapté au multi-instance.
+
+    Une file d’instants représente les unités consommées pour chaque clé. Un
+    verrou asyncio conserve l’indivisibilité du contrôle et du débit dans le
+    processus ; son historique reste indépendant de celui de Redis.
+    """
 
     def __init__(self) -> None:
+        """Prépare les événements, les identifiants déjà réservés et leur verrou commun."""
         self._events: dict[str, deque[float]] = defaultdict(deque)
         self._reservations: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
@@ -125,6 +156,7 @@ class LocalSlidingWindowLimiter:
         cost: int = 1,
         reservation_id: str | None = None,
     ) -> RateDecision:
+        """Applique toutes les fenêtres avant de débiter, avec la même idempotence que Redis."""
         _validate_request(windows, cost)
         now = time()
         reservation = reservation_id or uuid4().hex
@@ -150,6 +182,7 @@ class LocalSlidingWindowLimiter:
                     ceil(relevant[excess - 1] + window.seconds - now),
                 )
 
+            # Refuser ici ne consomme aucune unité, même si une autre fenêtre aurait accepté.
             if retry_after > 0:
                 return RateDecision(allowed=False, retry_after=max(1, retry_after))
 
@@ -162,6 +195,7 @@ class LocalSlidingWindowLimiter:
 
 
 class SharedRateLimiter:
+    """Privilégie Redis et n’autorise le compteur local que selon la politique choisie."""
     def __init__(
         self,
         store: RedisStore,
@@ -169,6 +203,7 @@ class SharedRateLimiter:
         allow_local_fallback: bool,
         local: LocalSlidingWindowLimiter | None = None,
     ) -> None:
+        """Injecte éventuellement le compteur local pour contrôler son comportement en test."""
         self._redis = RedisSlidingWindowLimiter(store)
         self._local = local or LocalSlidingWindowLimiter()
         self._allow_local_fallback = allow_local_fallback
@@ -181,6 +216,7 @@ class SharedRateLimiter:
         cost: int = 1,
         reservation_id: str | None = None,
     ) -> RateDecision:
+        """Conserve le même identifiant d’opération lors d’un éventuel repli local."""
         reservation = reservation_id or uuid4().hex
         try:
             return await self._redis.reserve(
@@ -203,13 +239,17 @@ class SharedRateLimiter:
 
 
 class OpenMeteoQuota:
+    """Partage les quatre budgets fournisseur et les périodes d’attente entre instances."""
+
     def __init__(self, store: RedisStore, settings: Settings) -> None:
+        """Construit les fenêtres et isole les clés par périmètre de consommation partagé."""
         self._store = store
         self._limiter = SharedRateLimiter(
             store,
             allow_local_fallback=settings.redis_failure_mode == "local",
         )
         scope = settings.open_meteo_quota_scope
+        # Le segment entre accolades regroupe ces clés dans le même hash slot Redis Cluster.
         self._events_key = store.key("quota", f"{{open-meteo-{scope}}}", "events")
         self._cooldown_key = store.key("quota", f"{{open-meteo-{scope}}}", "cooldown")
         self._windows = (
@@ -222,6 +262,11 @@ class OpenMeteoQuota:
         self._local_cooldown_until = 0.0
 
     async def reserve(self, cost: int, reservation_id: str | None = None) -> None:
+        """Vérifie l’attente fournisseur puis réserve le budget de toutes les fenêtres.
+
+        Les unités ne sont pas remboursées après un échec réseau : le fournisseur
+        peut avoir reçu et comptabilisé l’appel malgré l’absence de réponse locale.
+        """
         retry_after = await self._cooldown_retry_after()
         if retry_after > 0:
             raise RateLimitExceeded(retry_after)
@@ -235,6 +280,7 @@ class OpenMeteoQuota:
             raise RateLimitExceeded(decision.retry_after)
 
     async def block_for(self, seconds: int) -> None:
+        """Mémorise et partage une attente en conservant toujours la plus longue connue."""
         duration = max(1, seconds)
         self._local_cooldown_until = max(
             self._local_cooldown_until, monotonic() + duration
@@ -246,6 +292,11 @@ class OpenMeteoQuota:
                 return
 
     async def _cooldown_retry_after(self) -> int:
+        """Combine l’attente monotone locale et la durée Redis arrondie vers le haut.
+
+        Sans Redis, le mode closed bloque la réservation plutôt que d’ignorer
+        une éventuelle attente imposée par une autre instance.
+        """
         local_retry = ceil(self._local_cooldown_until - monotonic())
         try:
             milliseconds = await self._store.pttl(self._cooldown_key)
@@ -259,7 +310,10 @@ class OpenMeteoQuota:
 
 
 class ClientRateLimiter:
+    """Applique des budgets distincts par route et identité réseau, même sur cache hit."""
+
     def __init__(self, store: RedisStore, settings: Settings) -> None:
+        """Active un repli local pour maintenir une limitation entrante pendant une panne."""
         self._store = store
         self._limiter = SharedRateLimiter(store, allow_local_fallback=True)
         self._windows = {
@@ -274,6 +328,7 @@ class ClientRateLimiter:
         }
 
     async def check(self, endpoint: str, client_id: str) -> None:
+        """Compte une requête avant son traitement ou lève une erreur avec son délai."""
         decision = await self._limiter.reserve(
             self._store.key("client-limit", endpoint, client_id),
             self._windows[endpoint],
@@ -283,6 +338,7 @@ class ClientRateLimiter:
 
 
 def _validate_request(windows: tuple[RateWindow, ...], cost: int) -> None:
+    """Refuse une réservation impossible avant tout accès à Redis ou au compteur local."""
     if not windows:
         raise ValueError("Au moins une fenêtre de limitation est requise")
     if cost < 1:

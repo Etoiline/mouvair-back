@@ -1,4 +1,10 @@
-"""Crée une release locale du backend à partir des changements du changelog."""
+"""Crée une release locale du backend à partir des changements du changelog.
+
+Le script vérifie d’abord un dépôt propre, les versions synchronisées et la
+présence de changements non publiés. Il demande un niveau SemVer, prépare les
+fichiers et actualise uv.lock hors ligne avant le commit. --dry-run conserve ces validations mais
+s’arrête avant toute écriture. Le script ne pousse pas et ne crée pas de tag Git.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +16,12 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+# Les chemins dépendent du script et restent corrects quel que soit le dossier d’appel.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = PROJECT_ROOT / "pyproject.toml"
 PACKAGE_INIT_PATH = PROJECT_ROOT / "src" / "mouvair_api" / "__init__.py"
 CHANGELOG_PATH = PROJECT_ROOT / "CHANGELOG.md"
+LOCKFILE_PATH = PROJECT_ROOT / "uv.lock"
 PROJECT_VERSION_PATTERN = re.compile(r'(?m)^version = "(?P<version>[^"]+)"\s*$')
 PACKAGE_VERSION_PATTERN = re.compile(r'(?m)^__version__ = "(?P<version>[^"]+)"\s*$')
 RELEASE_HEADING_PATTERN = re.compile(
@@ -46,7 +54,11 @@ class Version:
         return cls(*(int(part) for part in match.groups()))
 
     def bump(self, part: str) -> Version:
-        """Calcule la prochaine version pour le niveau SemVer choisi."""
+        """Calcule la prochaine version et remet à zéro les niveaux inférieurs.
+
+        Une majeure remet mineure et corrective à zéro ; une mineure remet
+        seulement la corrective à zéro. Aucune mutation de la version courante.
+        """
 
         if part == "major":
             return Version(self.major + 1, 0, 0)
@@ -63,7 +75,12 @@ class Version:
 
 
 def run_git(*arguments: str, capture_output: bool = False) -> str:
-    """Exécute Git à la racine et transforme ses échecs en erreurs lisibles."""
+    """Exécute Git à la racine et transforme ses échecs en erreurs lisibles.
+
+    Les arguments sont transmis comme liste, sans interprétation par un shell.
+    La capture sert aux vérifications ; les commandes de commit gardent leur
+    sortie normale pour rendre l’opération visible dans le terminal.
+    """
 
     try:
         result = subprocess.run(
@@ -88,7 +105,11 @@ def run_git(*arguments: str, capture_output: bool = False) -> str:
 
 
 def ensure_clean_repository() -> None:
-    """Vérifie que le script agit bien sur sa racine et sur un dépôt propre."""
+    """Vérifie la racine et l’absence de changements avant de préparer la release.
+
+    Ce contrôle empêche d’embarquer des modifications de travail ou d’exécuter
+    l’opération dans le dépôt parent d’un projet imbriqué.
+    """
 
     repository_root = Path(run_git("rev-parse", "--show-toplevel", capture_output=True)).resolve()
     if repository_root != PROJECT_ROOT.resolve():
@@ -102,8 +123,56 @@ def ensure_clean_repository() -> None:
         )
 
 
+def run_uv(*arguments: str) -> None:
+    """Vérifie ou actualise le verrou avec la version de uv exigée par le projet."""
+
+    try:
+        result = subprocess.run(
+            ["uv", *arguments],
+            cwd=PROJECT_ROOT,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise ReleaseError(
+            "uv est introuvable. Installez la version indiquée dans le README."
+        ) from error
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ReleaseError(f"La commande uv a échoué : uv {' '.join(arguments)}\n{detail}")
+
+
+def write_release_files(contents: dict[Path, str]) -> None:
+    """Synchronise les fichiers et le verrou, avec restauration si la préparation échoue.
+
+    uv conserve les versions déjà résolues et modifie les métadonnées du package
+    local sans accès réseau. Aucun fichier n’est stagé avant cette étape réussie.
+    """
+
+    originals = {path: path.read_bytes() for path in (*contents, LOCKFILE_PATH)}
+    try:
+        for path, content in contents.items():
+            write_text(path, content)
+        run_uv("lock", "--offline")
+    except (ReleaseError, OSError) as error:
+        for path, original in originals.items():
+            path.write_bytes(original)
+        raise ReleaseError(
+            "La préparation de la release a échoué ; les fichiers ont été restaurés.\n"
+            f"{error}"
+        ) from error
+
+
 def read_project_version(pyproject: str, package_init: str) -> Version:
-    """Lit la version et vérifie ses deux sources avant de la modifier."""
+    """Exige une version unique et identique dans le package et dans pyproject.toml.
+
+    Les expressions régulières modifient ensuite uniquement ces lignes, sans
+    réécrire les commentaires ni le reste des fichiers de configuration.
+    """
 
     matches = list(PROJECT_VERSION_PATTERN.finditer(pyproject))
     if len(matches) != 1:
@@ -123,7 +192,11 @@ def read_project_version(pyproject: str, package_init: str) -> Version:
 
 
 def validate_changelog(changelog: str, current_version: Version) -> re.Match[str]:
-    """Valide le bloc non publié et la cohérence de la dernière release."""
+    """Valide les changements non publiés et leur position avant la dernière version.
+
+    Le bloc doit contenir une puce sans titre intermédiaire. La correspondance
+    renvoyée indique où insérer le futur titre pour englober ces changements.
+    """
 
     start = CHANGELOG_START_PATTERN.match(changelog)
     if not start:
@@ -152,7 +225,11 @@ def validate_changelog(changelog: str, current_version: Version) -> re.Match[str
 
 
 def ask_bump(current_version: Version) -> str:
-    """Demande le niveau SemVer jusqu'à obtenir un choix reconnu."""
+    """Affiche les trois versions possibles et demande un choix jusqu’à sa validation.
+
+    Une saisie vide choisit patch ; les chiffres sont des raccourcis. Une fin de
+    flux ou une interruption annule proprement avant toute écriture de fichier.
+    """
 
     choices = {"1": "patch", "2": "minor", "3": "major"}
     print(f"Version actuelle : {current_version}")
@@ -173,14 +250,14 @@ def ask_bump(current_version: Version) -> str:
 
 
 def write_text(path: Path, content: str) -> None:
-    """Écrit un fichier UTF-8 avec des fins de ligne stables."""
+    """Écrit en UTF-8 avec des fins LF, indépendamment de la plateforme de release."""
 
     with path.open("w", encoding="utf-8", newline="\n") as file:
         file.write(content.replace("\r\n", "\n"))
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construit les options non interactives complémentaires."""
+    """Déclare --dry-run ; le choix du niveau de version reste interactif dans ce mode."""
 
     parser = argparse.ArgumentParser(description="Créer une release locale du backend Mouv’Air.")
     parser.add_argument(
@@ -192,13 +269,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Valide, versionne et committe la prochaine release du backend."""
+    """Valide, prépare en mémoire, puis écrit et committe la prochaine release.
+
+    Les contenus sont calculés avant la branche dry-run. Le commit ne
+    stage que les fichiers de version, le changelog et le verrou ; un dernier contrôle
+    signale tout changement restant après l’opération.
+    """
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     arguments = build_parser().parse_args()
     ensure_clean_repository()
+    # Un verrou absent ou périmé doit être corrigé avant de commencer une release.
+    run_uv("lock", "--check", "--offline")
 
     pyproject = PYPROJECT_PATH.read_text(encoding="utf-8")
     package_init = PACKAGE_INIT_PATH.read_text(encoding="utf-8")
@@ -209,6 +293,7 @@ def main() -> None:
     release_date = date.today().isoformat()
     release_heading = f"## {next_version} - {release_date}\n\n"
 
+    # La préparation reste sans effet de bord, ce qui permet la prévisualisation complète.
     next_pyproject = PROJECT_VERSION_PATTERN.sub(
         f'version = "{next_version}"', pyproject, count=1
     )
@@ -227,15 +312,19 @@ def main() -> None:
         print(f"Commit : 🔖 Release {next_version}")
         return
 
-    write_text(PYPROJECT_PATH, next_pyproject)
-    write_text(PACKAGE_INIT_PATH, next_package_init)
-    write_text(CHANGELOG_PATH, next_changelog)
+    # La première écriture intervient seulement après tous les contrôles et le choix SemVer.
+    write_release_files({
+        PYPROJECT_PATH: next_pyproject,
+        PACKAGE_INIT_PATH: next_package_init,
+        CHANGELOG_PATH: next_changelog,
+    })
     run_git(
         "add",
         "--",
         PYPROJECT_PATH.name,
         PACKAGE_INIT_PATH.relative_to(PROJECT_ROOT).as_posix(),
         CHANGELOG_PATH.name,
+        LOCKFILE_PATH.name,
     )
     run_git("commit", "-m", f"🔖 Release {next_version}")
 
