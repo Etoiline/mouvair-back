@@ -9,24 +9,24 @@ requires-python = ">=3.12,<4.0"
 # httpx et redis assurent les accès asynchrones ; tzdata fournit les fuseaux IANA
 # notamment sur les systèmes dépourvus de base de fuseaux, comme Windows.
 dependencies = [
-    "fastapi==0.141.1",
+    "fastapi==0.162.0",
     "httpx==0.28.1",
-    "pydantic==2.13.4",
+    "pydantic==2.14.2",
     "redis==8.1.0",
-    "tzdata==2026.3",
-    "uvicorn[standard]==0.52.4",
+    "tzdata==2026.6",
+    "uvicorn[standard]==0.54.0",
 ]
 
 # uv sync --locked --extra dev ajoute les outils du même verrou au package éditable.
 [project.optional-dependencies]
 dev = [
-    "pytest==9.1.1",
-    "ruff==0.16.6",
+    "pytest==9.2.0",
+    "ruff==0.17.3",
 ]
 
 # Le constructeur est lui aussi épinglé, y compris dans l’environnement de build isolé.
 [build-system]
-requires = ["setuptools==84.0.0"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 # Le poste local, Docker et la CI utilisent le même format et le même moteur de verrouillage.

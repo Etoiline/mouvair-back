@@ -348,10 +348,13 @@ sans modifier le verrou. Répéter la commande conserve les versions résolues ;
 dépendances d’exécution, tandis que le poste de développement et la CI ajoutent l’extra `dev`.
 La version de uv et celle du constructeur Setuptools sont également épinglées dans le projet.
 
-Après une modification volontaire des dépendances dans `pyproject.toml` :
+Pour repérer les mises à jour disponibles, utiliser `uv tree --outdated`. Les dépendances directes
+sont épinglées avec `==` : modifier leurs versions dans `pyproject.toml`, y compris celles de l’extra
+`dev` et de Setuptools, après lecture des changements de compatibilité publiés par leurs projets.
+Actualiser ensuite le verrou, dépendances indirectes comprises, puis vérifier l’environnement :
 
 ```powershell
-uv lock
+uv lock --upgrade
 uv sync --locked --extra dev
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev pytest
