@@ -96,7 +96,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
 | `test_diagnostics.py` | Journaux JSON, durées, sources, replis et contexte concurrent des requêtes. |
 | `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
-| `test_redis_integration.py` | Atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
+| `test_redis_integration.py` | Lecture textuelle, atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
 
 `conftest.py` fournit un stockage mémoire indexé par clé pour exercer le véritable
 `RedisForecastCache` dans les tests unitaires. Le partage entre deux services est vérifié avec
@@ -215,6 +215,10 @@ ne consomment pas le budget client ; les origines absentes de la configuration n
 d’autorisation CORS.
 
 ## Redis et fonctionnement dégradé
+
+`RedisStore.get` renvoie du texte ou `None` pour une clé absente. Le client par défaut active
+`decode_responses=True` ; les réponses binaires d’un client injecté sont décodées en UTF-8 à la
+lecture, afin que les caches reçoivent le même type de données.
 
 En production, `REDIS_FAILURE_MODE=closed` empêche tout nouvel appel fournisseur lorsque Redis est
 indisponible. Les caches mémoire continuent à répondre et le repli `refresh_failed` ou `stale` reste
@@ -347,6 +351,10 @@ sans modifier le verrou. Répéter la commande conserve les versions résolues ;
 étrangers à cet environnement sont retirés. Docker utilise le même verrou, avec seulement les
 dépendances d’exécution, tandis que le poste de développement et la CI ajoutent l’extra `dev`.
 La version de uv et celle du constructeur Setuptools sont également épinglées dans le projet.
+
+Ruff contrôle les règles de lint ; Pyright contrôle les types dans l’éditeur et doit utiliser
+l’interpréteur de `.venv`. Les gardes de validation des mesures précisent aussi à Pyright qu’une
+valeur est numérique avant les calculs.
 
 Pour repérer les mises à jour disponibles, utiliser `uv tree --outdated`. Les dépendances directes
 sont épinglées avec `==` : modifier leurs versions dans `pyproject.toml`, y compris celles de l’extra

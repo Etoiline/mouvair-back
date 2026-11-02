@@ -10,6 +10,7 @@ du réseau et du cache, ce qui permet de vérifier les règles avec de simples d
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
+from typing import TypeGuard
 
 from .models import (
     AirQualityCategory,
@@ -253,12 +254,12 @@ def score_status(score: int) -> ScoreStatus:
     return "très défavorable"
 
 
-def _is_finite(value: float | None) -> bool:
-    """Refuse les absences, NaN et infinis avant d’évaluer une courbe."""
+def _is_finite(value: float | None) -> TypeGuard[float]:
+    """Valide un nombre fini et établit son type pour l’analyse statique."""
     return value is not None and isfinite(value)
 
 
-def _is_non_negative(value: float | None) -> bool:
+def _is_non_negative(value: float | None) -> TypeGuard[float]:
     """Ajoute la contrainte physique positive ou nulle pour pluie, vent et AQI."""
     return _is_finite(value) and value >= 0
 
@@ -360,7 +361,7 @@ def _weather_reason_factors(
     progressive_caps = {
         factor_id: min(100, factor_scores[factor_id] + 20) for factor_id in factor_order
     }
-    binding_factors = [
+    binding_factors: list[WeatherFactorId] = [
         factor_id
         for factor_id in factor_order
         if progressive_caps[factor_id] < weighted_score
@@ -369,7 +370,7 @@ def _weather_reason_factors(
     selected: list[tuple[WeatherFactorId, bool]] = []
     if binding_factors:
         lowest_cap = min(progressive_caps[factor_id] for factor_id in binding_factors)
-        first = next(
+        first: WeatherFactorId = next(
             factor_id
             for factor_id in binding_factors
             if progressive_caps[factor_id] == lowest_cap
@@ -471,8 +472,12 @@ def _calculate_weather(conditions: Conditions, profile: SportProfile) -> RawWeat
     alerts, event_caps = _event_alerts_and_caps(codes, profile)
     # Une seule borne météo inconnue suffit à suspendre la note complète du créneau.
     complete_codes = bool(codes) and all(code in VALID_WEATHER_CODES for code in codes)
-    raw_factor_scores = (temperature_score, rain_score, wind_score)
-    if not complete_codes or any(score is None for score in raw_factor_scores):
+    if (
+        not complete_codes
+        or temperature_score is None
+        or rain_score is None
+        or wind_score is None
+    ):
         return RawWeatherScore(
             public=WeatherScore(
                 score=None,
