@@ -1,5 +1,7 @@
 # Changelog
 
+- Update backend runtime, development and build dependencies, refresh the uv lockfile, and document dependency upgrades.
+
 - Fix Railway Docker builds by copying uv from its pinned image instead of using an unsupported bind mount, and build the production image in CI.
 
 ## 0.4.1 - 2026-11-01
