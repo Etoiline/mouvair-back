@@ -127,7 +127,7 @@ class RedisSlidingWindowLimiter:
     ) -> RateDecision:
         """Réserve un coût indivisible et identifie l’opération pour éviter un double débit."""
         _validate_request(windows, cost)
-        arguments: list[object] = [cost, reservation_id or uuid4().hex, len(windows)]
+        arguments: list[str | int] = [cost, reservation_id or uuid4().hex, len(windows)]
         for window in windows:
             arguments.extend((window.seconds, window.limit))
         result = await self._store.eval(SLIDING_WINDOW_SCRIPT, [key], arguments)
