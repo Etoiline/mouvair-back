@@ -1,5 +1,7 @@
 # Changelog
 
+- Clarify cache and quota contracts, diagnostic lifecycle, aggregated weather measurements, and test fixture behavior in French comments and documentation.
+
 - Fix Redis and scoring types for Pyright, decode binary Redis reads as UTF-8, and add integration coverage for injected clients.
 
 - Update backend runtime, development and build dependencies, refresh the uv lockfile, and document dependency upgrades.

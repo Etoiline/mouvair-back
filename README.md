@@ -19,6 +19,10 @@ Le package Python se trouve dans `src/mouvair_api`. Ses modules sont commentés 
 les docstrings expliquent les contrats et les commentaires détaillent les choix de traitement,
 notamment les plafonds, les bornes temporelles et la coordination entre requêtes.
 
+Les protocoles des caches et du quota précisent aussi les valeurs d’absence, les jetons de verrou
+et les erreurs attendues. Une entrée présente dans Redis n’est pas nécessairement fraîche : le
+service garde la responsabilité de vérifier son âge et sa couverture horaire.
+
 | Module | Responsabilité |
 |---|---|
 | `__init__.py` | Version du package, synchronisée par le script de release. |
