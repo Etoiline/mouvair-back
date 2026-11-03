@@ -53,7 +53,12 @@ class OpenMeteoProviderRateLimit(OpenMeteoError):
 
 
 class QuotaGuard(Protocol):
-    """Capacités requises par la passerelle : réserver des unités et imposer une attente."""
+    """Capacités requises par la passerelle : réserver des unités et imposer une attente.
+
+    reserve lève RateLimitExceeded si le budget ou l’attente interdit l’appel,
+    et RateLimitBackendUnavailable si aucun compteur autorisé ne peut le garantir.
+    block_for propage une limitation fournisseur au périmètre de quota partagé.
+    """
     async def reserve(self, cost: int) -> None: ...
 
     async def block_for(self, seconds: int) -> None: ...

@@ -23,7 +23,11 @@ class MutableClock:
 
 
 class SequencedFetcher:
-    """Fournisseur déterministe renvoyant successivement des prévisions ou des erreurs."""
+    """Fournisseur déterministe renvoyant successivement des prévisions ou des erreurs.
+
+    Les erreurs consomment aussi une réponse. Un appel au-delà de la séquence
+    échoue pour révéler une récupération imprévue plutôt que répéter le dernier résultat.
+    """
 
     def __init__(self, *outcomes: ForecastResponse | DataUnavailableError) -> None:
         self.outcomes = outcomes
