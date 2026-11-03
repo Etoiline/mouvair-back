@@ -24,6 +24,7 @@ class JsonDiagnosticFormatter(logging.Formatter):
     """Sérialise une ligne exploitable par Docker ou un collecteur de journaux."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Privilégie les métadonnées du log sur tout champ métier de même nom."""
         fields = getattr(record, "diagnostic_fields", {})
         timestamp = datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds")
         payload = {
@@ -80,6 +81,7 @@ class RequestDiagnosticsMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Isole le contexte de chaque requête HTTP et laisse passer les autres échanges ASGI."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -90,6 +92,8 @@ class RequestDiagnosticsMiddleware:
         outcome = "completed"
         failure_type: str | None = None
 
+        # Le statut émis reste celui observé même si une erreur survient ensuite ;
+        # outcome décrit séparément cette issue et la durée couvre aussi l’envoi du corps.
         async def observe_response(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":

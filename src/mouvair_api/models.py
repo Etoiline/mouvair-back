@@ -64,7 +64,11 @@ class Conditions(BaseModel):
 
 
 class PollenForecast(BaseModel):
-    """Concentrations de six pollens en grains/m³, indépendantes des trois notes."""
+    """Maxima des six pollens aux deux bornes, en grains/m³ et hors des trois notes.
+
+    Une borne absente rend son maximum inconnu ; une concentration égale à zéro
+    reste une donnée disponible.
+    """
     alder: float | None = None
     birch: float | None = None
     grass: float | None = None
@@ -78,6 +82,8 @@ class SlotConditions(Conditions):
 
     La température héritée correspond au profil de course tranquille. Pour une
     autre activité, sa valeur de calcul figure dans weather.factors.
+    Pluie et rafales décrivent l’heure terminée à la borne de fin ; le vent moyen
+    et l’AQI retiennent le maximum des deux bornes.
     """
     apparent_temperature_start: float | None = None
     apparent_temperature_end: float | None = None

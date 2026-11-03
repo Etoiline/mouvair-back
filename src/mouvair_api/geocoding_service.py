@@ -29,7 +29,12 @@ CacheKey = tuple[str, int]
 
 
 class GeocodingStore(Protocol):
-    """Primitives de stockage suffisantes au service, simulables sans serveur Redis."""
+    """Primitives de stockage suffisantes au service, simulables sans serveur Redis.
+
+    get distingue une clé absente (None) d’un JSON représentant une liste vide.
+    acquire_lock renvoie un jeton ou None si le verrou est déjà pris ; les pannes
+    sont signalées par RedisUnavailable pour laisser le service choisir son repli.
+    """
     def key(self, *parts: str) -> str: ...
 
     async def get(self, key: str) -> str | None: ...

@@ -65,7 +65,7 @@ def test_forecast_returns_twenty_four_scored_slots_and_provider_metadata(
     forecast_client: TestClient,
     forecast_fetcher: SequencedFetcher,
 ) -> None:
-    """Le JSON public contient les mesures, les intervalles et les quatre familles de notes."""
+    """Le JSON public contient les mesures, les intervalles et les notes des quatre activités."""
     response = forecast_client.get(
         "/api/forecast", params={"latitude": 45.75, "longitude": 4.85}
     )

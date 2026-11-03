@@ -24,6 +24,8 @@ MONTH_WINDOW_SECONDS = 31 * 24 * 60 * 60
 # TIME utilise l’horloge Redis pour que les instances partagent la même référence.
 # Chaque unité a un membre distinct : une prévision de coût 2 occupe deux places.
 # En cas de refus, les plus anciens événements déterminent le délai de libération.
+# ARGV contient coût, identifiant, nombre de fenêtres, puis les paires durée/plafond.
+# Une fenêtre exclut sa borne ancienne ; le résultat est le couple autorisé/délai en secondes.
 SLIDING_WINDOW_SCRIPT = """
 local key = KEYS[1]
 local cost = tonumber(ARGV[1])
@@ -127,7 +129,7 @@ class RedisSlidingWindowLimiter:
     ) -> RateDecision:
         """Réserve un coût indivisible et identifie l’opération pour éviter un double débit."""
         _validate_request(windows, cost)
-        arguments: list[object] = [cost, reservation_id or uuid4().hex, len(windows)]
+        arguments: list[str | int] = [cost, reservation_id or uuid4().hex, len(windows)]
         for window in windows:
             arguments.extend((window.seconds, window.limit))
         result = await self._store.eval(SLIDING_WINDOW_SCRIPT, [key], arguments)

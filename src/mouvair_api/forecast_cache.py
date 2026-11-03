@@ -62,15 +62,23 @@ class SharedForecastCache(Protocol):
     qui permet de simuler le partage entre instances dans les tests unitaires.
     Toutes les coordonnées passées à ces méthodes sont celles de la demande.
     """
-    async def get(self, latitude: float, longitude: float) -> ForecastResponse | None: ...
+    async def get(self, latitude: float, longitude: float) -> ForecastResponse | None:
+        """Renvoie une prévision valide ou None, sans garantir sa fraîcheur métier."""
+        ...
 
     async def set(
         self, latitude: float, longitude: float, forecast: ForecastResponse
-    ) -> None: ...
+    ) -> None:
+        """Conserve le résultat sous les coordonnées demandées, distinctes du contenu."""
+        ...
 
-    async def acquire_lock(self, latitude: float, longitude: float) -> str | None: ...
+    async def acquire_lock(self, latitude: float, longitude: float) -> str | None:
+        """Renvoie le jeton du verrou acquis, ou None si une autre instance le possède."""
+        ...
 
-    async def release_lock(self, latitude: float, longitude: float, token: str) -> None: ...
+    async def release_lock(self, latitude: float, longitude: float, token: str) -> None:
+        """Libère uniquement le verrou encore associé au jeton de son propriétaire."""
+        ...
 
     async def wait(
         self,
@@ -78,7 +86,13 @@ class SharedForecastCache(Protocol):
         longitude: float,
         *,
         previous_generated_at: str | None = None,
-    ) -> ForecastResponse | None: ...
+    ) -> ForecastResponse | None:
+        """Attend un generated_at différent du précédent ; None marque la fin d’attente.
+
+        Le service doit encore contrôler la couverture et l’âge du résultat reçu.
+        Une panne du stockage peut lever RedisUnavailable plutôt que renvoyer None.
+        """
+        ...
 
 
 class RedisForecastCache:

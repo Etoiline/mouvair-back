@@ -6,13 +6,14 @@ une connexion indisponible ; une opération réussie rétablit l’état normal.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from time import monotonic
 from typing import Any, TypeVar
 from uuid import uuid4
 
 import redis.asyncio as redis
 from redis.exceptions import RedisError
+from redis.typing import EncodableT
 
 from .config import Settings
 from .diagnostics import error_fields, log_event
@@ -105,8 +106,13 @@ class RedisStore:
         return True
 
     async def get(self, key: str) -> str | None:
-        """Lit une chaîne ; None signifie une clé absente, pas une panne de Redis."""
-        return await self._execute(lambda client: client.get(key))
+        """Lit une chaîne ; None signifie une clé absente, pas une panne de Redis.
+
+        Les réponses binaires d’un client injecté sont décodées en UTF-8 pour
+        conserver le même contrat que le client créé avec decode_responses=True.
+        """
+        value = await self._execute(lambda client: client.get(key))
+        return value.decode("utf-8") if isinstance(value, bytes) else value
 
     async def set(self, key: str, value: str, ttl_seconds: int) -> None:
         """Écrit une chaîne avec son expiration dans la même commande Redis."""
@@ -120,8 +126,8 @@ class RedisStore:
         """Lit la durée restante en millisecondes pour les périodes d’attente partagées."""
         return int(await self._execute(lambda client: client.pttl(key)))
 
-    async def eval(self, script: str, keys: list[str], arguments: list[object]) -> Any:
-        """Exécute atomiquement un script serveur, notamment pour réserver un quota."""
+    async def eval(self, script: str, keys: list[str], arguments: Sequence[EncodableT]) -> Any:
+        """Exécute atomiquement un script avec des arguments sérialisables par Redis."""
         return await self._execute(
             lambda client: client.eval(script, len(keys), *keys, *arguments)
         )

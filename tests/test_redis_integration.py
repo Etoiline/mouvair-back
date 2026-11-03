@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+import redis.asyncio as redis
 from fastapi.testclient import TestClient
 
 from forecast_fixtures import MutableClock
@@ -38,6 +39,27 @@ pytestmark = [
     pytest.mark.redis_integration,
     pytest.mark.skipif(TEST_REDIS_URL is None, reason="TEST_REDIS_URL n’est pas configurée"),
 ]
+
+
+@pytest.mark.parametrize("decode_responses", [False, True])
+def test_real_redis_get_preserves_text_with_an_injected_client(decode_responses: bool) -> None:
+    """Le contrat texte reste identique avec un client binaire ou déjà décodé."""
+    async def scenario() -> None:
+        assert TEST_REDIS_URL is not None
+        client = redis.Redis.from_url(TEST_REDIS_URL, decode_responses=decode_responses)
+        store = RedisStore(Settings(), client=client)
+        key = store.key("tests", uuid4().hex)
+        try:
+            assert await store.connect()
+            assert await store.get(key) is None
+            value = "Prévision météo pour Saint-Étienne"
+            await store.set(key, value, ttl_seconds=30)
+            assert await store.get(key) == value
+        finally:
+            await store.delete(key)
+            await store.close()
+
+    asyncio.run(scenario())
 
 
 def test_real_redis_never_overspends_a_concurrent_window() -> None:
