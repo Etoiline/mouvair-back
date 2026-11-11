@@ -11,24 +11,36 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mouvair_api.config import Settings
+from mouvair_api.errors import DataUnavailableError
 from mouvair_api.forecast_service import ForecastService
 from mouvair_api.forecast_slots import assemble_forecast
 from mouvair_api.main import create_app
 from mouvair_api.models import ForecastResponse, Location
-from mouvair_api.open_meteo import OpenMeteoQuotaError
+from mouvair_api.open_meteo import OpenMeteoError, OpenMeteoQuotaError
 
 
 class StubGeocoding:
-    """Service prévisible pour tester une ville ou une erreur de quota au niveau HTTP."""
-    def __init__(self, error: OpenMeteoQuotaError | None = None) -> None:
+    """Fournit un résultat de recherche ou une erreur de disponibilité au niveau HTTP."""
+
+    def __init__(
+        self,
+        error: DataUnavailableError | None = None,
+        *,
+        locations: list[Location] | None = None,
+    ) -> None:
         self.error = error
+        self.locations = (
+            [Location(id=1, name="Lyon", latitude=45.75, longitude=4.85)]
+            if locations is None
+            else locations
+        )
 
     async def search(self, query: str, count: int) -> list[Location]:
         """Ignore la recherche et produit uniquement l’issue configurée par le test."""
         del query, count
         if self.error is not None:
             raise self.error
-        return [Location(id=1, name="Lyon", latitude=45.75, longitude=4.85)]
+        return self.locations
 
 
 def test_health_reports_degraded_without_redis() -> None:
@@ -46,6 +58,50 @@ def test_location_search_requires_three_characters() -> None:
         response = client.get("/api/locations", params={"q": "Ly"})
 
     assert response.status_code == 422
+
+
+def test_location_search_returns_matching_city_as_json() -> None:
+    """La route sérialise les coordonnées et les métadonnées facultatives de la ville."""
+    app = create_app(Settings(redis_failure_mode="local"))
+    with TestClient(app) as client:
+        app.state.geocoding_service = StubGeocoding()
+        response = client.get("/api/locations", params={"q": "Lyon"})
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": 1,
+            "name": "Lyon",
+            "latitude": 45.75,
+            "longitude": 4.85,
+            "country": None,
+            "admin1": None,
+            "timezone": None,
+        }
+    ]
+
+
+def test_location_search_returns_empty_list_without_matches() -> None:
+    """Une recherche sans ville correspondante renvoie une liste JSON vide."""
+    app = create_app(Settings(redis_failure_mode="local"))
+    with TestClient(app) as client:
+        app.state.geocoding_service = StubGeocoding(locations=[])
+        response = client.get("/api/locations", params={"q": "Ville introuvable"})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_location_search_returns_502_when_provider_is_unavailable() -> None:
+    """La route traduit une indisponibilité du fournisseur en HTTP 502."""
+    message = "Open-Meteo est momentanément indisponible"
+    app = create_app(Settings(redis_failure_mode="local"))
+    with TestClient(app) as client:
+        app.state.geocoding_service = StubGeocoding(OpenMeteoError(message))
+        response = client.get("/api/locations", params={"q": "Lyon"})
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": message}
 
 
 def test_provider_calls_fail_closed_when_redis_is_not_configured() -> None:

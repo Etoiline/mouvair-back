@@ -1,5 +1,7 @@
 # Changelog
 
+- Add location search integration tests for a successful result, an empty result list, and a 502 response when the provider is unavailable.
+
 ## 0.4.2 - 2026-11-03
 
 - Clarify cache and quota contracts, diagnostic lifecycle, aggregated weather measurements, and test fixture behavior in French comments and documentation.

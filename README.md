@@ -97,7 +97,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_client_identity.py` | Proxy de confiance et résistance aux en-têtes d’adresse forgés. |
 | `test_config.py` | Valeurs par défaut et refus des configurations incohérentes. |
 | `test_release.py` | Mise à jour hors ligne du verrou et restauration des fichiers si elle échoue. |
-| `test_main.py` | Validation des entrées et traduction HTTP des états de service. |
+| `test_main.py` | Validation des entrées, résultats de la recherche de villes et traduction HTTP des erreurs de service. |
 | `test_diagnostics.py` | Journaux JSON, durées, sources, replis et contexte concurrent des requêtes. |
 | `test_forecast_api.py` | Contrat JSON, 24 créneaux, cache, repli, validation, quotas et CORS. |
 | `test_redis_integration.py` | Lecture textuelle, atomicité, verrous, TTL, corruption et rafraîchissements concurrents. |
