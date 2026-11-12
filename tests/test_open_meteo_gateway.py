@@ -7,6 +7,8 @@ la lecture de Retry-After sans contacter un service externe.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -140,12 +142,23 @@ def test_provider_429_creates_a_shared_cooldown(monkeypatch, caplog) -> None:
         pytest.param({"Retry-After": "37"}, 37, id="seconds"),
         pytest.param({}, 60, id="missing-header"),
         pytest.param({"Retry-After": "invalid"}, 60, id="invalid-header"),
+        pytest.param(
+            {"Retry-After": "Tue, 08 Sep 2026 12:05:16 GMT"}, 16, id="future-http-date"
+        ),
+        pytest.param(
+            {"Retry-After": "Tue, 08 Sep 2026 12:04:59 GMT"}, 1, id="past-http-date"
+        ),
     ],
 )
 def test_http_429_uses_retry_after_or_default(
-    headers: dict[str, str], expected_retry_after: int,
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    expected_retry_after: int,
 ) -> None:
-    """L’exception transmet le délai annoncé ou applique le délai de repli."""
+    """L’exception transmet le délai en secondes ou applique le délai de repli."""
+    fixed_datetime = Mock()
+    fixed_datetime.now.return_value = datetime(2026, 9, 8, 12, 5, 0, 500_000, tzinfo=UTC)
+    monkeypatch.setattr(open_meteo, "datetime", fixed_datetime)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers=headers, request=request)

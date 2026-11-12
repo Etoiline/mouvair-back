@@ -1,22 +1,36 @@
 """Vérifie le contrat HTTP avec le cycle de vie réel de l’application FastAPI.
 
-TestClient démarre et arrête les ressources dans son bloc with. Les services
-remplacés dans app.state isolent les traductions HTTP du réseau fournisseur ;
-les configurations sans Redis exercent les modes local et closed.
+TestClient démarre et arrête les ressources dans son bloc with. Les tests
+simulent le service de géocodage ou le transport HTTP du fournisseur selon
+le scénario. Les configurations sans Redis exercent les modes local et closed.
 """
 
 from datetime import UTC, datetime
+from functools import partial
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import mouvair_api.main as api_main
 from mouvair_api.config import Settings
 from mouvair_api.errors import DataUnavailableError
 from mouvair_api.forecast_service import ForecastService
 from mouvair_api.forecast_slots import assemble_forecast
 from mouvair_api.main import create_app
 from mouvair_api.models import ForecastResponse, Location
-from mouvair_api.open_meteo import OpenMeteoError, OpenMeteoQuotaError
+from mouvair_api.open_meteo import GEOCODING_URL, OpenMeteoError, OpenMeteoQuotaError
+
+LYON_LOCATION_JSON = {
+    "id": 1,
+    "name": "Lyon",
+    "latitude": 45.75,
+    "longitude": 4.85,
+    "country": "France",
+    "admin1": "Auvergne-Rhône-Alpes",
+    "timezone": "Europe/Paris",
+}
 
 
 class StubGeocoding:
@@ -102,6 +116,57 @@ def test_location_search_returns_502_when_provider_is_unavailable() -> None:
 
     assert response.status_code == 502
     assert response.json() == {"detail": message}
+
+
+@pytest.mark.parametrize(
+    ("results", "expected_status", "expected_json"),
+    [
+        pytest.param(
+            [{**LYON_LOCATION_JSON, "population": 500_000}],
+            200,
+            [LYON_LOCATION_JSON],
+            id="valid-location",
+        ),
+        pytest.param(
+            {"name": "Lyon"},
+            502,
+            {"detail": "Réponse Open-Meteo invalide"},
+            id="invalid-results",
+        ),
+        pytest.param(
+            [{"id": 1, "name": "Lyon"}],
+            502,
+            {"detail": "Réponse Open-Meteo invalide"},
+            id="missing-coordinates",
+        ),
+    ],
+)
+def test_location_search_translates_open_meteo_response(
+    monkeypatch: pytest.MonkeyPatch,
+    results: object,
+    expected_status: int,
+    expected_json: object,
+) -> None:
+    """Le géocodage HTTP conserve les champs utiles et signale les réponses invalides."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url).split("?", 1)[0] == GEOCODING_URL
+        assert dict(request.url.params) == {
+            "name": "Lyon",
+            "count": "3",
+            "language": "fr",
+            "format": "json",
+        }
+        return httpx.Response(200, json={"results": results})
+
+    provider_client_factory = partial(httpx.AsyncClient, transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(api_main, "httpx", SimpleNamespace(AsyncClient=provider_client_factory))
+    with TestClient(create_app(Settings(redis_failure_mode="local"))) as client:
+        response = client.get("/api/locations", params={"q": "Lyon", "count": 3})
+
+    assert response.status_code == expected_status
+    assert response.json() == expected_json
 
 
 def test_provider_calls_fail_closed_when_redis_is_not_configured() -> None:

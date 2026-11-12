@@ -8,6 +8,8 @@ vérifier que les variantes d’une même recherche partagent bien leur résulta
 import asyncio
 from collections.abc import Awaitable, Callable
 
+import pytest
+
 from mouvair_api.config import Settings
 from mouvair_api.geocoding_service import GeocodingService, normalize_location_query
 from mouvair_api.models import Location
@@ -155,6 +157,39 @@ def test_two_instances_share_the_redis_cache() -> None:
     second = service_with(fetcher, store)
 
     async def scenario() -> None:
+        assert await first.search("Lyon") == [lyon()]
+        assert await second.search("LYON") == [lyon()]
+
+    asyncio.run(scenario())
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "corrupted_value",
+    [
+        pytest.param("{", id="invalid-json"),
+        pytest.param("{}", id="invalid-container"),
+        pytest.param('[{"id": 1}]', id="invalid-location"),
+    ],
+)
+def test_corrupted_shared_geocoding_cache_is_rebuilt(corrupted_value: str) -> None:
+    """L’entrée invalide est supprimée avant de remettre en cache le résultat fournisseur."""
+    store = MemoryStore()
+    calls = 0
+
+    async def fetcher(query: str, count: int) -> list[Location]:
+        nonlocal calls
+        del query, count
+        calls += 1
+        assert cache_key not in store.values
+        return [lyon()]
+
+    first = service_with(fetcher, store)
+    second = service_with(fetcher, store)
+    cache_key = first._shared_key(("lyon", 5))
+
+    async def scenario() -> None:
+        await store.set(cache_key, corrupted_value, 60)
         assert await first.search("Lyon") == [lyon()]
         assert await second.search("LYON") == [lyon()]
 

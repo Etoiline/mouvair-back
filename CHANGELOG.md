@@ -1,5 +1,7 @@
 # Changelog
 
+- Cover Open-Meteo geocoding responses, recovery from invalid Redis geocoding entries, and `Retry-After` HTTP dates.
+
 - Test that the service reuses a forecast cached by another instance between the first read and lock acquisition.
 
 - Test that a cached forecast is served when Redis fails while waiting for a shared refresh.
