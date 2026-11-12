@@ -1,5 +1,7 @@
 # Changelog
 
+- Test that a cached forecast is served when Redis fails while waiting for a shared refresh.
+
 - Test that forecast refresh continues when Redis cannot acquire the shared lock.
 
 - Cover missing and invalid `Retry-After` headers on Open-Meteo 429 responses and forecast refresh after a Redis cache read failure.
