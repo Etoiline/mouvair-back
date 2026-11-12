@@ -277,13 +277,15 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     assert list(service._cache) == [(1, 1), (3, 3)]
 
 
-def test_shared_cache_read_failure_still_refreshes_forecast(
+@pytest.mark.parametrize("redis_operation", ["get", "acquire_lock"])
+def test_shared_cache_failure_still_refreshes_forecast(
     memory_redis_store: RedisStore,
     monkeypatch: pytest.MonkeyPatch,
+    redis_operation: str,
 ) -> None:
-    """Une lecture Redis indisponible laisse le fournisseur rafraîchir la prévision."""
-    redis_read = AsyncMock(side_effect=RedisUnavailable("Lecture Redis indisponible"))
-    monkeypatch.setattr(memory_redis_store, "get", redis_read)
+    """Le service rafraîchit la prévision malgré une erreur de lecture ou de verrouillage Redis."""
+    failed_operation = AsyncMock(side_effect=RedisUnavailable("Redis indisponible"))
+    monkeypatch.setattr(memory_redis_store, redis_operation, failed_operation)
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     provider_forecast = forecast_at(retrieved_at)
     fetcher = SequencedFetcher(provider_forecast)
@@ -295,7 +297,7 @@ def test_shared_cache_read_failure_still_refreshes_forecast(
 
     refreshed = asyncio.run(service.get_forecast(45.75, 4.85))
 
-    redis_read.assert_awaited()
+    failed_operation.assert_awaited()
     assert fetcher.calls == 1
     assert refreshed.from_cache is False
     assert refreshed.data_state == "fresh"

@@ -1,5 +1,7 @@
 # Changelog
 
+- Test that forecast refresh continues when Redis cannot acquire the shared lock.
+
 - Cover missing and invalid `Retry-After` headers on Open-Meteo 429 responses and forecast refresh after a Redis cache read failure.
 
 - Add location search integration tests for a successful result, an empty result list, and a 502 response when the provider is unavailable.
