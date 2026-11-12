@@ -8,6 +8,7 @@ un stockage mémoire partagé pour vérifier les échanges entre deux instances.
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -25,7 +26,7 @@ from mouvair_api.models import (
     PollenForecast,
     SlotConditions,
 )
-from mouvair_api.redis_store import RedisStore
+from mouvair_api.redis_store import RedisStore, RedisUnavailable
 from mouvair_api.scoring import calculate_score
 
 
@@ -274,6 +275,31 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     asyncio.run(scenario())
 
     assert list(service._cache) == [(1, 1), (3, 3)]
+
+
+def test_shared_cache_read_failure_still_refreshes_forecast(
+    memory_redis_store: RedisStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Une lecture Redis indisponible laisse le fournisseur rafraîchir la prévision."""
+    redis_read = AsyncMock(side_effect=RedisUnavailable("Lecture Redis indisponible"))
+    monkeypatch.setattr(memory_redis_store, "get", redis_read)
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    provider_forecast = forecast_at(retrieved_at)
+    fetcher = SequencedFetcher(provider_forecast)
+    service = ForecastService(
+        fetcher,
+        clock=MutableClock(retrieved_at),
+        shared_cache=RedisForecastCache(memory_redis_store, Settings()),
+    )
+
+    refreshed = asyncio.run(service.get_forecast(45.75, 4.85))
+
+    redis_read.assert_awaited()
+    assert fetcher.calls == 1
+    assert refreshed.from_cache is False
+    assert refreshed.data_state == "fresh"
+    assert refreshed.generated_at == provider_forecast.generated_at
 
 
 @pytest.mark.parametrize(

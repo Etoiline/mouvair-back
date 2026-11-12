@@ -134,16 +134,27 @@ def test_provider_429_creates_a_shared_cooldown(monkeypatch, caplog) -> None:
     assert recorded[0]["retry_after"] == 23
 
 
-def test_http_429_retry_after_is_preserved() -> None:
-    """Le délai annoncé par l’en-tête HTTP reste intact dans l’exception de bas niveau."""
+@pytest.mark.parametrize(
+    ("headers", "expected_retry_after"),
+    [
+        pytest.param({"Retry-After": "37"}, 37, id="seconds"),
+        pytest.param({}, 60, id="missing-header"),
+        pytest.param({"Retry-After": "invalid"}, 60, id="invalid-header"),
+    ],
+)
+def test_http_429_uses_retry_after_or_default(
+    headers: dict[str, str], expected_retry_after: int,
+) -> None:
+    """L’exception transmet le délai annoncé ou applique le délai de repli."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "37"}, request=request)
+        return httpx.Response(429, headers=headers, request=request)
 
     async def scenario() -> None:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(OpenMeteoProviderRateLimit) as caught:
                 await open_meteo._get_json(client, "https://example.test", {})
-            assert caught.value.retry_after == 37
+            assert caught.value.retry_after == expected_retry_after
 
     asyncio.run(scenario())
