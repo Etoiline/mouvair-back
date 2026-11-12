@@ -349,6 +349,32 @@ def test_two_instances_share_a_forecast_through_the_distributed_cache(
     assert (cached.latitude, cached.longitude) == (provider_latitude, provider_longitude)
 
 
+def test_reuses_forecast_published_before_acquiring_shared_lock(
+    memory_redis_store: RedisStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La relecture sous le verrou récupère une prévision publiée après la première lecture."""
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    published_forecast = forecast_at(retrieved_at)
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    acquire_lock = cache.acquire_lock
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, clock=MutableClock(retrieved_at), shared_cache=cache)
+
+    async def publish_before_acquiring_lock(latitude: float, longitude: float) -> str | None:
+        await cache.set(latitude, longitude, published_forecast)
+        return await acquire_lock(latitude, longitude)
+
+    monkeypatch.setattr(cache, "acquire_lock", publish_before_acquiring_lock)
+
+    cached = asyncio.run(service.get_forecast(45.75, 4.85))
+
+    assert fetcher.calls == 0
+    assert cached.from_cache is True
+    assert cached.data_state == "fresh"
+    assert cached.generated_at == published_forecast.generated_at
+
+
 @pytest.mark.parametrize(
     ("age_minutes", "state", "recommendation_available", "wait_outcome", "fallback_reason"),
     [

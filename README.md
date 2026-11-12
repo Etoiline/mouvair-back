@@ -89,7 +89,7 @@ Chaque fichier de test explique son périmètre et le comportement attendu des s
 | `test_scoring.py` | Courbes, frontières des catégories, arrondis, plafonds et données incomplètes. |
 | `test_open_meteo.py` | Paramètres HTTP et passage des réponses météo et air à l’assemblage. |
 | `test_forecast_slots.py` | Bornes des créneaux, jointure par timestamp, pollens et changements d’heure. |
-| `test_forecast_service.py` | Fraîcheur, replis sur erreur Redis en lecture, à la prise du verrou ou pendant l’attente, LRU, requêtes concurrentes et partage entre instances. |
+| `test_forecast_service.py` | Fraîcheur, replis Redis (lecture, prise du verrou et attente), LRU, partage entre instances, requêtes concurrentes et relecture après acquisition du verrou. |
 | `test_forecast_cache.py` | Identité, clés v1/v2, JSON, fuseaux, dates, créneaux et attente bornée. |
 | `test_geocoding_service.py` | Normalisation, cache négatif, partage et fonctionnement sans L2. |
 | `test_open_meteo_gateway.py` | Coûts réservés, erreurs de quota, propagation de `Retry-After` et délai de repli. |
