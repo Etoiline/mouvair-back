@@ -1,8 +1,9 @@
 """Vérifie le contrat HTTP avec le cycle de vie réel de l’application FastAPI.
 
-TestClient démarre et arrête les ressources dans son bloc with. Les tests
-simulent le service de géocodage ou le transport HTTP du fournisseur selon
-le scénario. Les configurations sans Redis exercent les modes local et closed.
+TestClient démarre et arrête les ressources dans son bloc with. Les doubles
+de géocodage sont installés dans app.state après le démarrage. Les tests de
+l’adaptateur configurent le transport sortant avant l’ouverture du client.
+Les configurations sans Redis exercent les modes local et closed.
 """
 
 from datetime import UTC, datetime
@@ -34,7 +35,11 @@ LYON_LOCATION_JSON = {
 
 
 class StubGeocoding:
-    """Fournit un résultat de recherche ou une erreur de disponibilité au niveau HTTP."""
+    """Fournit un résultat de recherche ou une erreur de disponibilité au niveau HTTP.
+
+    Par défaut, le double renvoie Lyon avec ses seuls champs obligatoires.
+    Une liste vide représente une recherche réussie sans ville correspondante.
+    """
 
     def __init__(
         self,
@@ -75,7 +80,7 @@ def test_location_search_requires_three_characters() -> None:
 
 
 def test_location_search_returns_matching_city_as_json() -> None:
-    """La route sérialise les coordonnées et les métadonnées facultatives de la ville."""
+    """Les coordonnées sont présentes et les champs facultatifs absents valent null dans le JSON."""
     app = create_app(Settings(redis_failure_mode="local"))
     with TestClient(app) as client:
         app.state.geocoding_service = StubGeocoding()
@@ -96,7 +101,7 @@ def test_location_search_returns_matching_city_as_json() -> None:
 
 
 def test_location_search_returns_empty_list_without_matches() -> None:
-    """Une recherche sans ville correspondante renvoie une liste JSON vide."""
+    """Un tableau vide permet au frontend de traiter la recherche comme un succès sans résultat."""
     app = create_app(Settings(redis_failure_mode="local"))
     with TestClient(app) as client:
         app.state.geocoding_service = StubGeocoding(locations=[])
@@ -107,7 +112,7 @@ def test_location_search_returns_empty_list_without_matches() -> None:
 
 
 def test_location_search_returns_502_when_provider_is_unavailable() -> None:
-    """La route traduit une indisponibilité du fournisseur en HTTP 502."""
+    """La route traduit l’indisponibilité en HTTP 502 et conserve le message dans detail."""
     message = "Open-Meteo est momentanément indisponible"
     app = create_app(Settings(redis_failure_mode="local"))
     with TestClient(app) as client:
@@ -147,7 +152,11 @@ def test_location_search_translates_open_meteo_response(
     expected_status: int,
     expected_json: object,
 ) -> None:
-    """Le géocodage HTTP conserve les champs utiles et signale les réponses invalides."""
+    """Exerce l’adaptateur Open-Meteo depuis la route de recherche de villes.
+
+    La population sert à vérifier le filtrage des champs hors contrat. Le fournisseur répond
+    toujours 200, de sorte que les 502 proviennent de la validation du contenu.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -160,6 +169,7 @@ def test_location_search_translates_open_meteo_response(
         }
         return httpx.Response(200, json={"results": results})
 
+    # Le remplacement dans main réserve MockTransport au client Open-Meteo créé au démarrage.
     provider_client_factory = partial(httpx.AsyncClient, transport=httpx.MockTransport(handler))
     monkeypatch.setattr(api_main, "httpx", SimpleNamespace(AsyncClient=provider_client_factory))
     with TestClient(create_app(Settings(redis_failure_mode="local"))) as client:

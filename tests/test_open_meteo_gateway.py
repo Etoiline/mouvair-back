@@ -155,7 +155,12 @@ def test_http_429_uses_retry_after_or_default(
     headers: dict[str, str],
     expected_retry_after: int,
 ) -> None:
-    """L’exception transmet le délai en secondes ou applique le délai de repli."""
+    """Vérifie le délai transmis par l’exception pour une réponse HTTP 429.
+
+    Un en-tête absent ou illisible donne 60 secondes. Une date passée donne
+    le délai minimal d’une seconde.
+    """
+    # Fige l’horloge à la demi-seconde pour vérifier que 15,5 s sont arrondies à 16 s.
     fixed_datetime = Mock()
     fixed_datetime.now.return_value = datetime(2026, 9, 8, 12, 5, 0, 500_000, tzinfo=UTC)
     monkeypatch.setattr(open_meteo, "datetime", fixed_datetime)

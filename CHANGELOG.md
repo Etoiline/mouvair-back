@@ -1,5 +1,7 @@
 # Changelog
 
+- Document the backend tests for Redis fallback, geocoding responses, and `Retry-After` handling.
+
 - Cover Open-Meteo geocoding responses, recovery from invalid Redis geocoding entries, and `Retry-After` HTTP dates.
 
 - Test that the service reuses a forecast cached by another instance between the first read and lock acquisition.

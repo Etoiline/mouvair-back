@@ -283,7 +283,11 @@ def test_shared_cache_failure_still_refreshes_forecast(
     monkeypatch: pytest.MonkeyPatch,
     redis_operation: str,
 ) -> None:
-    """Le service rafraîchit la prévision malgré une erreur de lecture ou de verrouillage Redis."""
+    """Vérifie le rafraîchissement après une erreur de lecture ou de prise du verrou.
+
+    Chaque cas fait échouer une seule opération du stockage. Le véritable adaptateur
+    RedisForecastCache et les autres opérations du stockage en mémoire restent actifs.
+    """
     failed_operation = AsyncMock(side_effect=RedisUnavailable("Redis indisponible"))
     monkeypatch.setattr(memory_redis_store, redis_operation, failed_operation)
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
@@ -353,7 +357,7 @@ def test_reuses_forecast_published_before_acquiring_shared_lock(
     memory_redis_store: RedisStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """La relecture sous le verrou récupère une prévision publiée après la première lecture."""
+    """La relecture sous le verrou évite un appel fournisseur en double."""
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     published_forecast = forecast_at(retrieved_at)
     cache = RedisForecastCache(memory_redis_store, Settings())
@@ -362,6 +366,8 @@ def test_reuses_forecast_published_before_acquiring_shared_lock(
     service = ForecastService(fetcher, clock=MutableClock(retrieved_at), shared_cache=cache)
 
     async def publish_before_acquiring_lock(latitude: float, longitude: float) -> str | None:
+        # Simule la publication par une autre instance après la première lecture du cache
+        # et juste avant que le service obtienne le verrou.
         await cache.set(latitude, longitude, published_forecast)
         return await acquire_lock(latitude, longitude)
 
@@ -394,11 +400,17 @@ def test_shared_refresh_wait_failure_preserves_the_previous_forecast(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Si l’attente échoue, le repli conserve l’âge et les créneaux connus."""
+    """Vérifie le repli sur la prévision en cache quand l’attente échoue.
+
+    Après l’échec du rafraîchissement, une prévision de 16 minutes permet encore une
+    recommandation. À 61 minutes, elle reste consultable et la recommandation est suspendue.
+    Le motif journalisé distingue une panne Redis d’un délai expiré.
+    """
     caplog.set_level(logging.INFO, logger="mouvair_api")
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     previous = forecast_at(retrieved_at)
     cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    # Le vrai adaptateur gère les délais expirés. Le double déclenche la panne pendant wait().
     if wait_outcome == "redis_unavailable":
         failed_wait = AsyncMock(side_effect=RedisUnavailable("Redis indisponible"))
         monkeypatch.setattr(cache, "wait", failed_wait)
@@ -408,6 +420,7 @@ def test_shared_refresh_wait_failure_preserves_the_previous_forecast(
 
     async def scenario() -> ForecastResponse:
         await cache.set(45.75, 4.85, previous)
+        # Un verrou déjà détenu représente le rafraîchissement en cours sur une autre instance.
         token = await cache.acquire_lock(45.75, 4.85)
         assert token is not None
         try:

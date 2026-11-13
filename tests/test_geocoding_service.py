@@ -173,7 +173,10 @@ def test_two_instances_share_the_redis_cache() -> None:
     ],
 )
 def test_corrupted_shared_geocoding_cache_is_rebuilt(corrupted_value: str) -> None:
-    """L’entrée invalide est supprimée avant de remettre en cache le résultat fournisseur."""
+    """Vérifie la réparation du cache partagé.
+
+    Les cas couvrent le décodage du JSON, le type de la valeur lue et les champs requis d’une ville.
+    """
     store = MemoryStore()
     calls = 0
 
@@ -181,6 +184,7 @@ def test_corrupted_shared_geocoding_cache_is_rebuilt(corrupted_value: str) -> No
         nonlocal calls
         del query, count
         calls += 1
+        # Vérifie la suppression de l’entrée avant que le résultat puisse l’écraser.
         assert cache_key not in store.values
         return [lyon()]
 
@@ -191,6 +195,7 @@ def test_corrupted_shared_geocoding_cache_is_rebuilt(corrupted_value: str) -> No
     async def scenario() -> None:
         await store.set(cache_key, corrupted_value, 60)
         assert await first.search("Lyon") == [lyon()]
+        # Le cache mémoire de la seconde instance est vide. Elle doit lire l’entrée réparée.
         assert await second.search("LYON") == [lyon()]
 
     asyncio.run(scenario())
