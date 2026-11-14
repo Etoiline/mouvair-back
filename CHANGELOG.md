@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3 - 2026-11-13
+
+- Document the backend tests for Redis fallback, geocoding responses, and `Retry-After` handling.
+
+- Cover Open-Meteo geocoding responses, recovery from invalid Redis geocoding entries, and `Retry-After` HTTP dates.
+
+- Test that the service reuses a forecast cached by another instance between the first read and lock acquisition.
+
+- Test that a cached forecast is served when Redis fails while waiting for a shared refresh.
+
+- Test that forecast refresh continues when Redis cannot acquire the shared lock.
+
+- Cover missing and invalid `Retry-After` headers on Open-Meteo 429 responses and forecast refresh after a Redis cache read failure.
+
+- Add location search integration tests for a successful result, an empty result list, and a 502 response when the provider is unavailable.
+
 ## 0.4.2 - 2026-11-03
 
 - Clarify cache and quota contracts, diagnostic lifecycle, aggregated weather measurements, and test fixture behavior in French comments and documentation.

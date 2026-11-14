@@ -8,6 +8,7 @@ un stockage mémoire partagé pour vérifier les échanges entre deux instances.
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -25,7 +26,7 @@ from mouvair_api.models import (
     PollenForecast,
     SlotConditions,
 )
-from mouvair_api.redis_store import RedisStore
+from mouvair_api.redis_store import RedisStore, RedisUnavailable
 from mouvair_api.scoring import calculate_score
 
 
@@ -276,6 +277,37 @@ def test_cache_discards_the_least_recently_used_position() -> None:
     assert list(service._cache) == [(1, 1), (3, 3)]
 
 
+@pytest.mark.parametrize("redis_operation", ["get", "acquire_lock"])
+def test_shared_cache_failure_still_refreshes_forecast(
+    memory_redis_store: RedisStore,
+    monkeypatch: pytest.MonkeyPatch,
+    redis_operation: str,
+) -> None:
+    """Vérifie le rafraîchissement après une erreur de lecture ou de prise du verrou.
+
+    Chaque cas fait échouer une seule opération du stockage. Le véritable adaptateur
+    RedisForecastCache et les autres opérations du stockage en mémoire restent actifs.
+    """
+    failed_operation = AsyncMock(side_effect=RedisUnavailable("Redis indisponible"))
+    monkeypatch.setattr(memory_redis_store, redis_operation, failed_operation)
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    provider_forecast = forecast_at(retrieved_at)
+    fetcher = SequencedFetcher(provider_forecast)
+    service = ForecastService(
+        fetcher,
+        clock=MutableClock(retrieved_at),
+        shared_cache=RedisForecastCache(memory_redis_store, Settings()),
+    )
+
+    refreshed = asyncio.run(service.get_forecast(45.75, 4.85))
+
+    failed_operation.assert_awaited()
+    assert fetcher.calls == 1
+    assert refreshed.from_cache is False
+    assert refreshed.data_state == "fresh"
+    assert refreshed.generated_at == provider_forecast.generated_at
+
+
 @pytest.mark.parametrize(
     ("provider_latitude", "provider_longitude"),
     [(45.75, 4.85), (45.76, 4.86)],
@@ -321,27 +353,74 @@ def test_two_instances_share_a_forecast_through_the_distributed_cache(
     assert (cached.latitude, cached.longitude) == (provider_latitude, provider_longitude)
 
 
-@pytest.mark.parametrize(
-    ("age", "state", "recommendation_available"),
-    [(timedelta(minutes=16), "refresh_failed", True), (timedelta(minutes=61), "stale", False)],
-)
-def test_shared_refresh_timeout_preserves_the_previous_forecast(
+def test_reuses_forecast_published_before_acquiring_shared_lock(
     memory_redis_store: RedisStore,
-    age: timedelta,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La relecture sous le verrou évite un appel fournisseur en double."""
+    retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
+    published_forecast = forecast_at(retrieved_at)
+    cache = RedisForecastCache(memory_redis_store, Settings())
+    acquire_lock = cache.acquire_lock
+    fetcher = SequencedFetcher()
+    service = ForecastService(fetcher, clock=MutableClock(retrieved_at), shared_cache=cache)
+
+    async def publish_before_acquiring_lock(latitude: float, longitude: float) -> str | None:
+        # Simule la publication par une autre instance après la première lecture du cache
+        # et juste avant que le service obtienne le verrou.
+        await cache.set(latitude, longitude, published_forecast)
+        return await acquire_lock(latitude, longitude)
+
+    monkeypatch.setattr(cache, "acquire_lock", publish_before_acquiring_lock)
+
+    cached = asyncio.run(service.get_forecast(45.75, 4.85))
+
+    assert fetcher.calls == 0
+    assert cached.from_cache is True
+    assert cached.data_state == "fresh"
+    assert cached.generated_at == published_forecast.generated_at
+
+
+@pytest.mark.parametrize(
+    ("age_minutes", "state", "recommendation_available", "wait_outcome", "fallback_reason"),
+    [
+        (16, "refresh_failed", True, "timeout", "shared_refresh_timeout"),
+        (61, "stale", False, "timeout", "shared_refresh_timeout"),
+        (16, "refresh_failed", True, "redis_unavailable", "redis_unavailable"),
+    ],
+    ids=["recent-timeout", "stale-timeout", "redis-unavailable"],
+)
+def test_shared_refresh_wait_failure_preserves_the_previous_forecast(
+    memory_redis_store: RedisStore,
+    age_minutes: int,
     state: str,
     recommendation_available: bool,
+    wait_outcome: str,
+    fallback_reason: str,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """À l’expiration de l’attente, le repli conserve l’âge et les créneaux connus."""
+    """Vérifie le repli sur la prévision en cache quand l’attente échoue.
+
+    Après l’échec du rafraîchissement, une prévision de 16 minutes permet encore une
+    recommandation. À 61 minutes, elle reste consultable et la recommandation est suspendue.
+    Le motif journalisé distingue une panne Redis d’un délai expiré.
+    """
     caplog.set_level(logging.INFO, logger="mouvair_api")
     retrieved_at = datetime(2026, 9, 8, 12, 5, tzinfo=UTC)
     previous = forecast_at(retrieved_at)
     cache = RedisForecastCache(memory_redis_store, Settings(forecast_lock_wait_seconds=0.05))
+    # Le vrai adaptateur gère les délais expirés. Le double déclenche la panne pendant wait().
+    if wait_outcome == "redis_unavailable":
+        failed_wait = AsyncMock(side_effect=RedisUnavailable("Redis indisponible"))
+        monkeypatch.setattr(cache, "wait", failed_wait)
     fetcher = SequencedFetcher()
-    service = ForecastService(fetcher, clock=MutableClock(retrieved_at + age), shared_cache=cache)
+    clock = MutableClock(retrieved_at + timedelta(minutes=age_minutes))
+    service = ForecastService(fetcher, clock=clock, shared_cache=cache)
 
     async def scenario() -> ForecastResponse:
         await cache.set(45.75, 4.85, previous)
+        # Un verrou déjà détenu représente le rafraîchissement en cours sur une autre instance.
         token = await cache.acquire_lock(45.75, 4.85)
         assert token is not None
         try:
@@ -367,8 +446,8 @@ def test_shared_refresh_timeout_preserves_the_previous_forecast(
         if record.name == "mouvair_api" and record.getMessage() == "forecast.fallback"
     ]
     assert len(wait_events) == len(fallback_events) == 1
-    assert wait_events[0]["outcome"] == "timeout"
-    assert fallback_events[0]["reason"] == "shared_refresh_timeout"
+    assert wait_events[0]["outcome"] == wait_outcome
+    assert fallback_events[0]["reason"] == fallback_reason
 
 
 def test_shared_refresh_timeout_without_previous_forecast_does_not_duplicate_the_fetch(

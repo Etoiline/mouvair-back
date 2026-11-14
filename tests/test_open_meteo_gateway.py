@@ -7,6 +7,8 @@ la lecture de Retry-After sans contacter un service externe.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -134,16 +136,43 @@ def test_provider_429_creates_a_shared_cooldown(monkeypatch, caplog) -> None:
     assert recorded[0]["retry_after"] == 23
 
 
-def test_http_429_retry_after_is_preserved() -> None:
-    """Le délai annoncé par l’en-tête HTTP reste intact dans l’exception de bas niveau."""
+@pytest.mark.parametrize(
+    ("headers", "expected_retry_after"),
+    [
+        pytest.param({"Retry-After": "37"}, 37, id="seconds"),
+        pytest.param({}, 60, id="missing-header"),
+        pytest.param({"Retry-After": "invalid"}, 60, id="invalid-header"),
+        pytest.param(
+            {"Retry-After": "Tue, 08 Sep 2026 12:05:16 GMT"}, 16, id="future-http-date"
+        ),
+        pytest.param(
+            {"Retry-After": "Tue, 08 Sep 2026 12:04:59 GMT"}, 1, id="past-http-date"
+        ),
+    ],
+)
+def test_http_429_uses_retry_after_or_default(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    expected_retry_after: int,
+) -> None:
+    """Vérifie le délai transmis par l’exception pour une réponse HTTP 429.
+
+    Un en-tête absent ou illisible donne 60 secondes. Une date passée donne
+    le délai minimal d’une seconde.
+    """
+    # Fige l’horloge à la demi-seconde pour vérifier que 15,5 s sont arrondies à 16 s.
+    fixed_datetime = Mock()
+    fixed_datetime.now.return_value = datetime(2026, 9, 8, 12, 5, 0, 500_000, tzinfo=UTC)
+    monkeypatch.setattr(open_meteo, "datetime", fixed_datetime)
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "37"}, request=request)
+        return httpx.Response(429, headers=headers, request=request)
 
     async def scenario() -> None:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(OpenMeteoProviderRateLimit) as caught:
                 await open_meteo._get_json(client, "https://example.test", {})
-            assert caught.value.retry_after == 37
+            assert caught.value.retry_after == expected_retry_after
 
     asyncio.run(scenario())
